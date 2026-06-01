@@ -1,0 +1,1248 @@
+'use strict';
+
+// ===== CATEGORY CONFIG =====
+// Add new categories here — all views derive from this array automatically.
+const CATEGORIES = [
+  { id:'activity', label:'Activity',          icon:'⚡', color:'#a598ff', colorDim:'rgba(165,152,255,0.11)', colorGlow:'rgba(165,152,255,0.25)' },
+  { id:'food',     label:'Food',              icon:'🍽️', color:'#f09348', colorDim:'rgba(240,147,72,0.11)',  colorGlow:'rgba(240,147,72,0.25)'  },
+  { id:'drink',    label:'Drink',             icon:'🥤', color:'#3dd6a3', colorDim:'rgba(61,214,163,0.11)',  colorGlow:'rgba(61,214,163,0.25)'  },
+  // isModifier=true → appears as a Suggest tab but is handled separately in Generate
+  { id:'modifier', label:'Activity Modifier', icon:'🎲', color:'#f472b6', colorDim:'rgba(244,114,182,0.11)', colorGlow:'rgba(244,114,182,0.25)', isModifier:true },
+];
+
+// ===== API CLIENT =====
+const API = {
+  token: localStorage.getItem('np_token'),
+
+  setToken(t) {
+    this.token = t;
+    t ? localStorage.setItem('np_token', t) : localStorage.removeItem('np_token');
+  },
+
+  async req(method, path, body) {
+    const opts = {
+      method,
+      headers: { 'Content-Type': 'application/json', ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}) },
+    };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    const res = await fetch(`/api${path}`, opts);
+    if (res.status === 401) { Auth.signOut(); return; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+    return data;
+  },
+
+  get:    (p)    => API.req('GET',    p),
+  post:   (p, b) => API.req('POST',   p, b),
+  put:    (p, b) => API.req('PUT',    p, b),
+  delete: (p)    => API.req('DELETE', p),
+};
+
+// ===== AUTH STATE =====
+let currentUser = null;
+
+const Auth = {
+  async init() {
+    if (!API.token) return;
+    try { currentUser = await API.get('/auth/me'); } catch { API.setToken(null); }
+  },
+  signOut() {
+    currentUser = null;
+    API.setToken(null);
+    Router.go('/auth');
+  },
+};
+
+// ===== TOAST =====
+function toast(msg, type = 'info') {
+  const root = document.getElementById('toast-root');
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = msg;
+  root.appendChild(el);
+  requestAnimationFrame(() => { requestAnimationFrame(() => el.classList.add('show')); });
+  setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 350); }, 3200);
+}
+
+// ===== MODAL =====
+function openModal(html, afterInsert) {
+  const root = document.getElementById('modal-root');
+  root.innerHTML = `<div class="modal-overlay"></div><div class="modal">${html}</div>`;
+  root.classList.add('active');
+  root.querySelector('.modal-overlay').onclick = closeModal;
+  const closeBtn = root.querySelector('.modal-close');
+  if (closeBtn) closeBtn.onclick = closeModal;
+  if (afterInsert) afterInsert(root.querySelector('.modal'));
+}
+
+function closeModal() {
+  const root = document.getElementById('modal-root');
+  root.classList.remove('active');
+  root.innerHTML = '';
+}
+
+// ===== DOM HELPERS =====
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function fmtDate(ts) { return new Date(ts).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}); }
+function fmtShort(ts) { return new Date(ts).toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
+function initial(name) { return (name||'?')[0].toUpperCase(); }
+function catById(id) { return CATEGORIES.find(c=>c.id===id); }
+function catVars(cat) { return `--cat-color:${cat.color};--cat-color-dim:${cat.colorDim};--cat-color-glow:${cat.colorGlow}`; }
+function setApp(html) { document.getElementById('app').innerHTML = html; }
+function loadingView() { setApp('<div class="loading-screen"><div class="spinner"></div></div>'); }
+
+function shuffle(arr) {
+  const a=[...arr];
+  for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}
+  return a;
+}
+
+// ===== ROUTER =====
+const Router = {
+  go(hash) { window.location.hash = hash; },
+  current() {
+    const h = window.location.hash.replace('#','') || '/';
+    const parts = h.split('/').filter(Boolean);
+    return { view: parts[0] || 'home', id: parts[1] || null, sub: parts[2] || null };
+  },
+  async dispatch() {
+    updateNav();
+    const { view, id } = this.current();
+    if (!currentUser && view !== 'auth' && view !== 'join') { this.go('/auth'); return; }
+    if (currentUser && view === 'auth') { this.go('/pools'); return; }
+    try {
+      if (view === 'auth')   { await renderAuth(); return; }
+      if (view === 'pools')  { await renderPools(); return; }
+      if (view === 'pool' && id) { await renderPool(id); return; }
+      if (view === 'browse') { await renderBrowse(); return; }
+      if (view === 'join' && id) { await renderJoin(id); return; }
+      this.go(currentUser ? '/pools' : '/auth');
+    } catch(err) {
+      console.error(err);
+      setApp(`<div class="view"><div class="error-banner">${esc(err.message)}</div><button class="btn btn-ghost" onclick="history.back()">← Go back</button></div>`);
+    }
+  },
+};
+
+function updateNav() {
+  const links = document.getElementById('nav-links');
+  const right = document.getElementById('nav-right');
+  if (!currentUser) {
+    links.innerHTML = '';
+    right.innerHTML = '';
+    return;
+  }
+  const { view } = Router.current();
+  links.innerHTML = [
+    ['pools',  'My Pools'],
+    ['browse', 'Browse'],
+  ].map(([v,label]) => `<li><button class="nav-link ${view===v?'active':''}" onclick="Router.go('/${v}')">${label}</button></li>`).join('');
+  right.innerHTML = `<span class="nav-user">Hi, ${esc(currentUser.displayName)}</span><button class="btn-signout" onclick="Auth.signOut()">Sign out</button>`;
+}
+
+// ===== AUTH VIEW =====
+async function renderAuth() {
+  const pending = sessionStorage.getItem('np_pending_join');
+  setApp(`
+    <div class="auth-view">
+      <div class="auth-card">
+        <div class="auth-logo">NightPick</div>
+        <div class="auth-subtitle">Plan your night, together.</div>
+        <div class="auth-tabs">
+          <button class="auth-tab active" id="tab-signin" onclick="switchAuthTab('signin')">Sign in</button>
+          <button class="auth-tab" id="tab-signup" onclick="switchAuthTab('signup')">Create account</button>
+        </div>
+        <div id="auth-form-area"></div>
+      </div>
+    </div>
+  `);
+  renderAuthForm('signin');
+}
+
+function switchAuthTab(mode) {
+  document.getElementById('tab-signin').classList.toggle('active', mode==='signin');
+  document.getElementById('tab-signup').classList.toggle('active', mode==='signup');
+  renderAuthForm(mode);
+}
+
+function renderAuthForm(mode) {
+  const area = document.getElementById('auth-form-area');
+  if (mode === 'signin') {
+    area.innerHTML = `
+      <form class="auth-form" id="signin-form">
+        <div id="auth-error"></div>
+        <div class="field"><label>Email</label><input class="input" type="email" name="email" placeholder="you@example.com" required autocomplete="email"/></div>
+        <div class="field"><label>Password</label><input class="input" type="password" name="password" placeholder="••••••••" required autocomplete="current-password"/></div>
+        <button class="btn btn-primary" type="submit" style="width:100%;justify-content:center">Sign in</button>
+      </form>
+    `;
+    document.getElementById('signin-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const btn = e.target.querySelector('button[type=submit]');
+      btn.disabled = true; btn.textContent = 'Signing in…';
+      try {
+        const r = await API.post('/auth/login', { email: fd.get('email'), password: fd.get('password') });
+        API.setToken(r.token); currentUser = r.user;
+        const pending = sessionStorage.getItem('np_pending_join');
+        if (pending) { sessionStorage.removeItem('np_pending_join'); Router.go(`/join/${pending}`); }
+        else Router.go('/pools');
+      } catch(err) {
+        document.getElementById('auth-error').innerHTML = `<div class="auth-error">${esc(err.message)}</div>`;
+        btn.disabled = false; btn.textContent = 'Sign in';
+      }
+    };
+  } else {
+    area.innerHTML = `
+      <form class="auth-form" id="signup-form">
+        <div id="auth-error"></div>
+        <div class="field"><label>Display name</label><input class="input" type="text" name="displayName" placeholder="Your name" required maxlength="30"/></div>
+        <div class="field"><label>Email</label><input class="input" type="email" name="email" placeholder="you@example.com" required autocomplete="email"/></div>
+        <div class="field"><label>Password</label><input class="input" type="password" name="password" placeholder="Min 6 characters" required autocomplete="new-password" minlength="6"/></div>
+        <button class="btn btn-primary" type="submit" style="width:100%;justify-content:center">Create account</button>
+      </form>
+    `;
+    document.getElementById('signup-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const btn = e.target.querySelector('button[type=submit]');
+      btn.disabled = true; btn.textContent = 'Creating account…';
+      try {
+        const r = await API.post('/auth/register', { email: fd.get('email'), password: fd.get('password'), displayName: fd.get('displayName') });
+        API.setToken(r.token); currentUser = r.user;
+        const pending = sessionStorage.getItem('np_pending_join');
+        if (pending) { sessionStorage.removeItem('np_pending_join'); Router.go(`/join/${pending}`); }
+        else Router.go('/pools');
+      } catch(err) {
+        document.getElementById('auth-error').innerHTML = `<div class="auth-error">${esc(err.message)}</div>`;
+        btn.disabled = false; btn.textContent = 'Create account';
+      }
+    };
+  }
+}
+
+// ===== MY POOLS VIEW =====
+async function renderPools() {
+  loadingView();
+  const pools = await API.get('/pools');
+  const totalItems = pools.reduce((s,p) => s + Object.values(p.counts||{}).reduce((a,b)=>a+b,0), 0);
+
+  setApp(`
+    <div class="view">
+      <div class="page-header">
+        <div class="page-header-left">
+          <h1>My Pools</h1>
+          <p>${pools.length} pool${pools.length!==1?'s':''} · ${totalItems} suggestions total</p>
+        </div>
+        <div class="page-header-actions">
+          <button class="btn btn-primary" onclick="openCreatePoolModal()">+ New Pool</button>
+        </div>
+      </div>
+      ${pools.length === 0
+        ? `<div class="empty-pools"><div class="empty-icon">🌙</div><p>No pools yet</p><p class="empty-sub">Create a pool and invite friends to start collecting ideas.</p><button class="btn btn-primary" style="margin-top:16px" onclick="openCreatePoolModal()">Create your first pool</button></div>`
+        : `<div class="pools-grid">${pools.map(poolCard).join('')}</div>`
+      }
+    </div>
+  `);
+}
+
+function poolCard(p) {
+  const isOwner = p.my_role === 'owner';
+  const totalCount = Object.values(p.counts||{}).reduce((a,b)=>a+b,0);
+  return `
+    <div class="pool-card" onclick="Router.go('/pool/${esc(p.id)}')">
+      <div class="pool-card-top">
+        <div>
+          <div class="pool-card-name">${esc(p.name)}</div>
+          ${p.description ? `<div class="pool-card-desc">${esc(p.description)}</div>` : ''}
+        </div>
+        <div class="pool-card-badges">
+          ${p.is_published ? '<span class="badge badge-published">● Published</span>' : '<span class="badge badge-private">Private</span>'}
+          <span class="badge ${isOwner?'badge-owner':'badge-contributor'}">${isOwner?'Owner':'Contributor'}</span>
+        </div>
+      </div>
+      <div class="pool-card-counts">
+        ${CATEGORIES.map(cat => `<span class="cat-pill" style="${catVars(cat)}">${cat.icon} ${p.counts?.[cat.id]||0} ${cat.label}</span>`).join('')}
+      </div>
+      <div class="pool-card-footer">
+        <span class="pool-card-meta">${p.member_count} member${p.member_count!==1?'s':''} · Created ${fmtShort(p.created_at)}</span>
+        <span class="btn btn-ghost btn-sm">Open →</span>
+      </div>
+    </div>
+  `;
+}
+
+function openCreatePoolModal() {
+  openModal(`
+    <button class="modal-close">×</button>
+    <div class="modal-title">Create a new pool</div>
+    <form id="create-pool-form">
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div class="field"><label>Pool name *</label><input class="input" name="name" placeholder="e.g. Friday Night Ideas" required maxlength="60" autofocus/></div>
+        <div class="field"><label>Description</label><textarea class="input" name="description" placeholder="What's this pool for?" maxlength="200"></textarea></div>
+        <div class="field">
+          <label>Duplicate suggestions</label>
+          <div class="toggle-wrapper">
+            <label class="toggle">
+              <input type="checkbox" id="allow-dup-toggle" checked/>
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            </label>
+            <span class="toggle-label" id="allow-dup-label">Allowed — members can add any text</span>
+          </div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create pool</button>
+      </div>
+    </form>
+  `, (modal) => {
+    const dupToggle = modal.querySelector('#allow-dup-toggle');
+    const dupLabel  = modal.querySelector('#allow-dup-label');
+    dupToggle.addEventListener('change', () => {
+      dupLabel.textContent = dupToggle.checked
+        ? 'Allowed — members can add any text'
+        : 'Blocked — similar text will be rejected';
+    });
+    modal.querySelector('#create-pool-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const btn = e.target.querySelector('button[type=submit]');
+      btn.disabled = true; btn.textContent = 'Creating…';
+      try {
+        const pool = await API.post('/pools', { name: fd.get('name'), description: fd.get('description'), allowDuplicates: dupToggle.checked });
+        closeModal();
+        toast(`"${pool.name}" created!`, 'success');
+        Router.go(`/pool/${pool.id}`);
+      } catch(err) {
+        toast(err.message, 'error');
+        btn.disabled = false; btn.textContent = 'Create pool';
+      }
+    };
+  });
+}
+
+// ===== POOL DETAIL VIEW =====
+let poolState = { pool:null, suggestions:null, members:null, tab:'suggest', activeCategory:null };
+
+async function renderPool(id) {
+  loadingView();
+  let pool;
+  try { pool = await API.get(`/pools/${id}`); }
+  catch(err) {
+    setApp(`<div class="view"><div class="error-banner">${esc(err.message)}</div><button class="btn btn-ghost" onclick="Router.go('/pools')">← My Pools</button></div>`);
+    return;
+  }
+
+  const suggestions = await API.get(`/pools/${id}/suggestions`);
+  poolState = { pool, suggestions, members: null, tab: 'suggest', activeCategory: CATEGORIES[0].id };
+
+  renderPoolShell();
+  renderPoolTab('suggest');
+}
+
+function renderPoolShell() {
+  const { pool } = poolState;
+  const isOwner = pool.my_role === 'owner';
+  const isMember = !!pool.my_role;
+  const totalCount = Object.values(pool.counts||{}).reduce((a,b)=>a+b,0);
+
+  setApp(`
+    <div class="view">
+      <button class="back-link" onclick="Router.go('/pools')">← My Pools</button>
+
+      <div class="pool-header">
+        <div class="pool-header-top">
+          <div class="pool-header-info">
+            <div class="pool-title">${esc(pool.name)}</div>
+            ${pool.description ? `<div class="pool-desc">${esc(pool.description)}</div>` : ''}
+            <div class="pool-header-badges">
+              ${pool.is_published ? '<span class="badge badge-published">● Published</span>' : '<span class="badge badge-private">🔒 Private</span>'}
+              ${!pool.allow_duplicates ? '<span class="badge badge-no-dupes">No duplicates</span>' : ''}
+              <span class="pool-stat">👥 ${pool.member_count} member${pool.member_count!==1?'s':''}</span>
+              <span class="pool-stat">💡 ${totalCount} suggestions</span>
+            </div>
+          </div>
+          <div class="pool-header-actions" id="pool-header-actions">
+            ${isMember ? renderPoolHeaderActions(pool) : ''}
+          </div>
+        </div>
+      </div>
+
+      <div class="pool-tabs">
+        <button class="pool-tab active" id="ptab-suggest" onclick="switchPoolTab('suggest')">Suggest</button>
+        <button class="pool-tab" id="ptab-generate" onclick="switchPoolTab('generate')">Generate</button>
+        ${isMember ? `<button class="pool-tab" id="ptab-members" onclick="switchPoolTab('members')">Members</button>` : ''}
+      </div>
+
+      <div id="pool-tab-content"></div>
+    </div>
+  `);
+  attachPoolHeaderActions();
+}
+
+function renderPoolHeaderActions(pool) {
+  const isOwner = pool.my_role === 'owner';
+  return `
+    ${isOwner ? `
+      <button class="btn ${pool.is_published?'btn-ghost':'btn-success'} btn-sm" id="btn-publish">
+        ${pool.is_published ? '🔒 Unpublish' : '🌐 Publish'}
+      </button>
+      <button class="btn btn-ghost btn-sm" id="btn-edit-pool">Edit</button>
+    ` : ''}
+    <button class="btn btn-ghost btn-sm" id="btn-invite">Invite link</button>
+    ${isOwner
+      ? `<button class="btn btn-danger btn-sm" id="btn-delete-pool">Delete pool</button>`
+      : `<button class="btn btn-ghost btn-sm" id="btn-leave-pool">Leave</button>`}
+  `;
+}
+
+function attachPoolHeaderActions() {
+  const { pool } = poolState;
+  const isOwner = pool.my_role === 'owner';
+
+  document.getElementById('btn-publish')?.addEventListener('click', async () => {
+    try {
+      const r = await API.post(`/pools/${pool.id}/publish`);
+      poolState.pool.is_published = r.is_published;
+      toast(r.is_published ? 'Pool is now public on Browse.' : 'Pool is now private.', 'success');
+      renderPoolShell();
+      renderPoolTab(poolState.tab);
+      attachPoolHeaderActions();
+    } catch(err) { toast(err.message, 'error'); }
+  });
+
+  document.getElementById('btn-invite')?.addEventListener('click', async () => {
+    try {
+      const r = await API.get(`/pools/${pool.id}/invite-code`);
+      const link = `${location.origin}/#/join/${r.code}`;
+      openModal(`
+        <button class="modal-close">×</button>
+        <div class="modal-title">Invite link</div>
+        <p style="font-size:13px;color:var(--text-dim);margin-bottom:14px">Share this link to let others contribute to <strong>${esc(pool.name)}</strong>.</p>
+        <div class="invite-link-row">
+          <div class="invite-link-box" id="invite-link-text">${esc(link)}</div>
+          <button class="btn btn-ghost btn-sm" id="btn-copy-invite">Copy</button>
+          ${isOwner ? `<button class="btn btn-ghost btn-sm" id="btn-refresh-code">Refresh</button>` : ''}
+        </div>
+        <p style="font-size:12px;color:var(--text-muted);margin-top:10px">Anyone with this link can join and contribute. Refreshing generates a new link and invalidates the old one.</p>
+      `, (modal) => {
+        modal.querySelector('#btn-copy-invite').onclick = () => {
+          navigator.clipboard.writeText(link).then(() => toast('Link copied!', 'success')).catch(() => toast('Copy failed — copy manually.', 'error'));
+        };
+        modal.querySelector('#btn-refresh-code')?.addEventListener('click', async () => {
+          try {
+            const r2 = await API.post(`/pools/${pool.id}/invite-code/refresh`);
+            const newLink = `${location.origin}/#/join/${r2.code}`;
+            modal.querySelector('#invite-link-text').textContent = newLink;
+            modal.querySelector('#btn-copy-invite').onclick = () => navigator.clipboard.writeText(newLink).then(()=>toast('Link copied!','success'));
+            toast('Invite link refreshed.', 'success');
+          } catch(err) { toast(err.message, 'error'); }
+        });
+      });
+    } catch(err) { toast(err.message, 'error'); }
+  });
+
+  document.getElementById('btn-edit-pool')?.addEventListener('click', () => {
+    const allowDupChecked = pool.allow_duplicates !== 0;
+    openModal(`
+      <button class="modal-close">×</button>
+      <div class="modal-title">Edit pool</div>
+      <form id="edit-pool-form">
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <div class="field"><label>Pool name *</label><input class="input" name="name" value="${esc(pool.name)}" required maxlength="60"/></div>
+          <div class="field"><label>Description</label><textarea class="input" name="description" maxlength="200">${esc(pool.description||'')}</textarea></div>
+          <div class="field">
+            <label>Duplicate suggestions</label>
+            <div class="toggle-wrapper">
+              <label class="toggle">
+                <input type="checkbox" id="edit-dup-toggle" ${allowDupChecked?'checked':''}/>
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              </label>
+              <span class="toggle-label" id="edit-dup-label">${allowDupChecked?'Allowed — members can add any text':'Blocked — similar text will be rejected'}</span>
+            </div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save</button>
+        </div>
+      </form>
+    `, (modal) => {
+      const editDupToggle = modal.querySelector('#edit-dup-toggle');
+      const editDupLabel  = modal.querySelector('#edit-dup-label');
+      editDupToggle.addEventListener('change', () => {
+        editDupLabel.textContent = editDupToggle.checked
+          ? 'Allowed — members can add any text'
+          : 'Blocked — similar text will be rejected';
+      });
+      modal.querySelector('#edit-pool-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        try {
+          await API.put(`/pools/${pool.id}`, { name: fd.get('name'), description: fd.get('description'), allowDuplicates: editDupToggle.checked });
+          poolState.pool.name = fd.get('name'); poolState.pool.description = fd.get('description');
+          poolState.pool.allow_duplicates = editDupToggle.checked ? 1 : 0;
+          closeModal(); toast('Pool updated.', 'success');
+          renderPoolShell(); renderPoolTab(poolState.tab); attachPoolHeaderActions();
+        } catch(err) { toast(err.message, 'error'); }
+      };
+    });
+  });
+
+  document.getElementById('btn-delete-pool')?.addEventListener('click', () => {
+    openModal(`
+      <button class="modal-close">×</button>
+      <div class="modal-title">Delete pool?</div>
+      <p style="font-size:14px;color:var(--text-dim);margin-bottom:20px">This will permanently delete <strong>${esc(pool.name)}</strong> and all its suggestions. This cannot be undone.</p>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-danger" id="confirm-delete">Delete permanently</button>
+      </div>
+    `, (modal) => {
+      modal.querySelector('#confirm-delete').onclick = async () => {
+        try { await API.delete(`/pools/${pool.id}`); closeModal(); toast('Pool deleted.', 'success'); Router.go('/pools'); }
+        catch(err) { toast(err.message, 'error'); }
+      };
+    });
+  });
+
+  document.getElementById('btn-leave-pool')?.addEventListener('click', () => {
+    openModal(`
+      <button class="modal-close">×</button>
+      <div class="modal-title">Leave pool?</div>
+      <p style="font-size:14px;color:var(--text-dim);margin-bottom:20px">You'll need a new invite link to rejoin <strong>${esc(pool.name)}</strong>.</p>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-danger" id="confirm-leave">Leave pool</button>
+      </div>
+    `, (modal) => {
+      modal.querySelector('#confirm-leave').onclick = async () => {
+        try { await API.delete(`/pools/${pool.id}/members/${currentUser.id}`); closeModal(); toast('Left the pool.', 'success'); Router.go('/pools'); }
+        catch(err) { toast(err.message, 'error'); }
+      };
+    });
+  });
+}
+
+function switchPoolTab(tab) {
+  poolState.tab = tab;
+  document.querySelectorAll('.pool-tab').forEach(b => b.classList.remove('active'));
+  document.getElementById(`ptab-${tab}`)?.classList.add('active');
+  renderPoolTab(tab);
+}
+
+async function renderPoolTab(tab) {
+  if (tab === 'suggest') renderSuggestTab();
+  else if (tab === 'generate') renderGenerateTab();
+  else if (tab === 'members') await renderMembersTab();
+}
+
+// ===== SUGGEST TAB =====
+function renderSuggestTab() {
+  const { pool, suggestions } = poolState;
+  const isMember = !!pool.my_role;
+  const isOwner  = pool.my_role === 'owner';
+  const cat = catById(poolState.activeCategory);
+
+  const content = document.getElementById('pool-tab-content');
+  content.innerHTML = `
+    <div class="category-tabs" id="cat-tabs"></div>
+    ${isMember ? `
+      <div class="add-form" id="add-form" style="${catVars(cat)}">
+        <span class="add-form-icon" id="add-form-icon">${cat.icon}</span>
+        <input type="text" id="suggestion-input" placeholder="Add a ${cat.label.toLowerCase()}…" maxlength="200" autocomplete="off"/>
+        <button class="btn-add" id="add-btn" style="background:${cat.color}">Add</button>
+      </div>
+    ` : `<div class="readonly-notice">👁 You're viewing this pool as a guest — join to contribute suggestions.</div>`}
+    <div id="suggestions-area"></div>
+  `;
+
+  renderCategoryTabs();
+  renderSuggestions();
+
+  if (isMember) {
+    const addBtn = document.getElementById('add-btn');
+    const addInput = document.getElementById('suggestion-input');
+    const doAdd = async () => {
+      const text = addInput.value.trim();
+      if (!text) { addInput.focus(); return; }
+      addBtn.disabled = true;
+      try {
+        const s = await API.post(`/pools/${pool.id}/suggestions`, { categoryId: poolState.activeCategory, text });
+        poolState.suggestions.push(s);
+        poolState.pool.counts = poolState.pool.counts || {};
+        poolState.pool.counts[poolState.activeCategory] = (poolState.pool.counts[poolState.activeCategory]||0)+1;
+        addInput.value = '';
+        addInput.focus();
+        renderCategoryTabs();
+        renderSuggestions();
+      } catch(err) { toast(err.message, 'error'); }
+      finally { addBtn.disabled = false; }
+    };
+    addBtn.addEventListener('click', doAdd);
+    addInput.addEventListener('keydown', e => { if(e.key==='Enter') doAdd(); });
+  }
+}
+
+function renderCategoryTabs() {
+  const tabs = document.getElementById('cat-tabs');
+  if (!tabs) return;
+  const counts = poolState.pool.counts || {};
+  tabs.innerHTML = CATEGORIES.map(cat => `
+    <button class="tab-btn ${poolState.activeCategory===cat.id?'active':''}" style="${catVars(cat)}" data-cat="${cat.id}">
+      <span class="tab-icon">${cat.icon}</span>${cat.label}
+      <span class="tab-count">${counts[cat.id]||0}</span>
+    </button>
+  `).join('');
+  tabs.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      poolState.activeCategory = btn.dataset.cat;
+      renderCategoryTabs();
+      renderSuggestions();
+      // update add form placeholder
+      const cat = catById(poolState.activeCategory);
+      const inp = document.getElementById('suggestion-input');
+      const icon = document.getElementById('add-form-icon');
+      const addBtn = document.getElementById('add-btn');
+      if (inp) inp.placeholder = `Add a ${cat.label.toLowerCase()}…`;
+      if (icon) icon.textContent = cat.icon;
+      if (addBtn) addBtn.style.background = cat.color;
+    });
+  });
+}
+
+function renderSuggestions() {
+  const { pool, suggestions } = poolState;
+  const cat = catById(poolState.activeCategory);
+  const isOwner = pool.my_role === 'owner';
+  const catSuggestions = suggestions.filter(s => s.category_id === poolState.activeCategory).slice().reverse();
+  const area = document.getElementById('suggestions-area');
+  if (!area) return;
+
+  if (catSuggestions.length === 0) {
+    area.innerHTML = `<div class="empty-state"><div class="empty-icon">${cat.icon}</div><p class="empty-primary">No ${cat.label.toLowerCase()} suggestions yet</p><p class="empty-sub">Be the first to add one!</p></div>`;
+    return;
+  }
+
+  area.innerHTML = `
+    <div class="suggestions-header">
+      <div class="suggestions-title" style="${catVars(cat)}"><span class="dot"></span>${catSuggestions.length} ${cat.label} suggestion${catSuggestions.length!==1?'s':''}</div>
+    </div>
+    <div class="suggestions-grid">
+      ${catSuggestions.map(s => {
+        const canDelete = isOwner || s.added_by === currentUser?.id;
+        return `
+          <div class="suggestion-card" style="${catVars(cat)}" data-id="${s.id}">
+            <div class="suggestion-content">
+              <div class="suggestion-text">${esc(s.text)}</div>
+              <div class="suggestion-meta">
+                <span class="suggestion-user">${esc(s.added_by_name)}</span>
+                <span class="suggestion-dot"></span>
+                <span class="suggestion-date">${fmtShort(s.created_at)}</span>
+              </div>
+            </div>
+            <div class="suggestion-actions">
+              ${canDelete ? `<button class="delete-btn" data-id="${s.id}" title="Delete">×</button>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+
+  area.querySelectorAll('.delete-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        await API.delete(`/pools/${pool.id}/suggestions/${btn.dataset.id}`);
+        poolState.suggestions = poolState.suggestions.filter(s => s.id !== btn.dataset.id);
+        poolState.pool.counts[poolState.activeCategory] = Math.max(0, (poolState.pool.counts[poolState.activeCategory]||1)-1);
+        renderCategoryTabs();
+        renderSuggestions();
+        toast('Suggestion removed.', 'success');
+      } catch(err) { toast(err.message, 'error'); }
+    });
+  });
+}
+
+// ===== GENERATE TAB =====
+let lastGenSettings = null;
+
+function renderGenerateTab() {
+  const hasModifiers = CATEGORIES.some(c => c.isModifier);
+  const lgs = lastGenSettings || {};
+  const content = document.getElementById('pool-tab-content');
+  content.innerHTML = `
+    <div class="generate-controls">
+      <div class="gen-ctrl">
+        <span class="control-label">Combinations</span>
+        <input type="number" class="count-input" id="combo-count" value="${lgs.count||5}" min="1" max="50"/>
+      </div>
+      <div class="control-divider"></div>
+      <div class="gen-ctrl">
+        <span class="control-label">Allow repeats</span>
+        <div class="toggle-wrapper">
+          <label class="toggle">
+            <input type="checkbox" id="replacement-toggle" ${lgs.withReplacement!==false?'checked':''}>
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          </label>
+          <span class="toggle-label" id="toggle-label">${lgs.withReplacement!==false?'Yes — same item can repeat':'No — each item used once'}</span>
+        </div>
+      </div>
+      ${hasModifiers ? `
+      <div class="control-divider"></div>
+      <div class="gen-ctrl">
+        <span class="control-label">Activity modifiers</span>
+        <div class="toggle-wrapper">
+          <label class="toggle">
+            <input type="checkbox" id="modifier-toggle" ${lgs.includeModifiers?'checked':''}>
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          </label>
+          <span class="toggle-label" id="modifier-label">${lgs.includeModifiers?'Included':'Excluded'}</span>
+        </div>
+      </div>
+      <div class="chance-row" id="chance-row" style="${lgs.includeModifiers?'':'display:none'}">
+        <span class="control-label">Modifier chance</span>
+        <div style="display:flex;align-items:center;gap:10px">
+          <input type="range" class="chance-slider" id="chance-slider" min="0" max="100" value="${lgs.modifierChance??50}"/>
+          <span class="chance-display" id="chance-display">${lgs.modifierChance??50}%</span>
+        </div>
+      </div>
+      ` : ''}
+      <button class="btn-generate" id="generate-btn">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/><path d="M8 5v3l2 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        Generate
+      </button>
+      <button class="btn-reshuffle" id="reshuffle-btn" style="display:none">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M1 4h10M1 4l3-3M1 4l3 3M15 12H5M15 12l-3-3M15 12l-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Reshuffle
+      </button>
+    </div>
+    <div id="results-area">
+      <div class="generate-placeholder">
+        <div class="placeholder-glyph">✦</div>
+        <p class="placeholder-text">Set your options and click Generate</p>
+        <p class="placeholder-sub">Combinations are drawn from this pool's suggestions</p>
+      </div>
+    </div>
+  `;
+
+  const toggle = document.getElementById('replacement-toggle');
+  const toggleLabel = document.getElementById('toggle-label');
+  toggle.addEventListener('change', () => {
+    toggleLabel.textContent = toggle.checked ? 'Yes — same item can repeat' : 'No — each item used once';
+  });
+
+  if (hasModifiers) {
+    const modToggle   = document.getElementById('modifier-toggle');
+    const modLabel    = document.getElementById('modifier-label');
+    const chanceRow   = document.getElementById('chance-row');
+    const chanceSlider = document.getElementById('chance-slider');
+    const chanceDisplay = document.getElementById('chance-display');
+    modToggle.addEventListener('change', () => {
+      modLabel.textContent = modToggle.checked ? 'Included' : 'Excluded';
+      chanceRow.style.display = modToggle.checked ? '' : 'none';
+    });
+    chanceSlider.addEventListener('input', () => {
+      chanceDisplay.textContent = `${chanceSlider.value}%`;
+    });
+  }
+
+  const doGenerate = () => {
+    const count = Math.max(1, Math.min(50, parseInt(document.getElementById('combo-count').value)||5));
+    const withReplacement = document.getElementById('replacement-toggle').checked;
+    const includeModifiers = hasModifiers && document.getElementById('modifier-toggle').checked;
+    const modifierChance = hasModifiers ? parseInt(document.getElementById('chance-slider')?.value ?? 50) : 0;
+    lastGenSettings = { count, withReplacement, includeModifiers, modifierChance };
+    runGenerate(count, withReplacement, includeModifiers, modifierChance);
+  };
+
+  document.getElementById('generate-btn').addEventListener('click', doGenerate);
+  document.getElementById('reshuffle-btn').addEventListener('click', doGenerate);
+
+  if (lastGenSettings) doGenerate();
+}
+
+function runGenerate(count, withReplacement, includeModifiers=false, modifierChance=50, suggOverride=null, resultsId='results-area', reshuffleId='reshuffle-btn') {
+  const suggestions = suggOverride || poolState.suggestions;
+  const resultsArea = document.getElementById(resultsId);
+  const reshuffleBtn = document.getElementById(reshuffleId);
+
+  const colCats = CATEGORIES.filter(c => !c.isModifier);
+  const modCat  = CATEGORIES.find(c => c.isModifier);
+
+  const pools = {};
+  let anyEmpty = false;
+  colCats.forEach(cat => {
+    const items = suggestions.filter(s => s.category_id === cat.id);
+    if (items.length === 0) anyEmpty = true;
+    pools[cat.id] = shuffle(items);
+  });
+
+  if (anyEmpty) {
+    resultsArea.innerHTML = `<div class="error-banner">⚠ Each category needs at least one suggestion before you can generate. Switch to the Suggest tab to add some.</div>`;
+    reshuffleBtn.style.display = 'none';
+    return;
+  }
+
+  const minPoolSize = Math.min(...colCats.map(cat => pools[cat.id].length));
+  const actualCount = withReplacement ? count : Math.min(count, minPoolSize);
+  const truncated = !withReplacement && actualCount < count;
+
+  // Build shuffled modifier pool for no-repeat depletion
+  let modifierPool = [];
+  let modifierUsed = 0;
+  if (includeModifiers && modCat) {
+    modifierPool = shuffle(suggestions.filter(s => s.category_id === modCat.id));
+  }
+
+  // Activity cell is the first non-modifier category whose id === 'activity', or fallback to first col
+  const actCat = colCats.find(c => c.id === 'activity') || colCats[0];
+
+  const combos = [];
+  for (let i = 0; i < actualCount; i++) {
+    const row = {};
+    colCats.forEach(cat => {
+      row[cat.id] = withReplacement
+        ? pools[cat.id][Math.floor(Math.random() * pools[cat.id].length)]
+        : pools[cat.id][i];
+    });
+    // Each row independently rolls for a modifier on the activity cell
+    row._modifier = null;
+    if (includeModifiers && modCat && modifierPool.length > 0) {
+      if (Math.random() * 100 < modifierChance) {
+        if (withReplacement) {
+          row._modifier = modifierPool[Math.floor(Math.random() * modifierPool.length)];
+        } else if (modifierUsed < modifierPool.length) {
+          row._modifier = modifierPool[modifierUsed++];
+        }
+      }
+    }
+    combos.push(row);
+  }
+
+  const colTemplate = `36px repeat(${colCats.length},1fr)`;
+  let html = '';
+  if (truncated) html += `<div class="warning-banner">⚠ Only ${actualCount} combination${actualCount!==1?'s':''} generated — not enough unique suggestions without repeats.</div>`;
+  html += `
+    <div class="results-meta">
+      <span class="results-count">${actualCount} combination${actualCount!==1?'s':''}</span>
+      <span class="results-mode">${withReplacement?'with repeats':'no repeats'}</span>
+    </div>
+    <div class="combo-grid-header" style="grid-template-columns:${colTemplate}">
+      <div></div>
+      ${colCats.map(cat=>`<div class="combo-col-header" style="${catVars(cat)}">${cat.icon} ${esc(cat.label)}</div>`).join('')}
+    </div>
+    <div class="combo-grid">
+      ${combos.map((row,i)=>`
+        <div class="combo-row" style="grid-template-columns:${colTemplate};animation-delay:${i*40}ms">
+          <div class="combo-row-number">${i+1}</div>
+          ${colCats.map(cat=>`
+            <div class="combo-cell" style="${catVars(cat)}">
+              <div class="combo-cell-label">${esc(cat.label)}</div>
+              <div class="combo-cell-text">${esc(row[cat.id].text)}</div>
+              ${cat.id === actCat.id && row._modifier ? `<div class="combo-modifier-pill" style="--mod-color:${modCat.color}">${esc(modCat.icon)} ${esc(row._modifier.text)}</div>` : ''}
+              <div class="combo-cell-user">by ${esc(row[cat.id].added_by_name)}</div>
+            </div>
+          `).join('')}
+        </div>
+      `).join('')}
+    </div>
+  `;
+  resultsArea.innerHTML = html;
+  reshuffleBtn.style.display = 'flex';
+}
+
+// ===== MEMBERS TAB =====
+async function renderMembersTab() {
+  const { pool } = poolState;
+  const isOwner = pool.my_role === 'owner';
+  const content = document.getElementById('pool-tab-content');
+  content.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+
+  const members = await API.get(`/pools/${pool.id}/members`);
+  poolState.members = members;
+
+  // Get invite code for display
+  let inviteLink = '';
+  try {
+    const r = await API.get(`/pools/${pool.id}/invite-code`);
+    inviteLink = `${location.origin}/#/join/${r.code}`;
+  } catch {}
+
+  content.innerHTML = `
+    <div class="invite-section">
+      <h3>Invite link</h3>
+      <div class="invite-link-row">
+        <div class="invite-link-box" id="invite-link-display">${esc(inviteLink)}</div>
+        <button class="btn btn-ghost btn-sm" id="btn-copy-link">Copy</button>
+        ${isOwner ? `<button class="btn btn-ghost btn-sm" id="btn-refresh-invite">Refresh code</button>` : ''}
+      </div>
+      <p style="font-size:12px;color:var(--text-muted);margin-top:8px">Share this with anyone you want to invite as a contributor.</p>
+    </div>
+
+    <div class="members-list" id="members-list">
+      ${members.map(m => memberRow(m, isOwner, pool.created_by)).join('')}
+    </div>
+  `;
+
+  document.getElementById('btn-copy-link').onclick = () => {
+    navigator.clipboard.writeText(inviteLink).then(()=>toast('Invite link copied!','success')).catch(()=>toast('Copy failed.','error'));
+  };
+
+  document.getElementById('btn-refresh-invite')?.addEventListener('click', async () => {
+    try {
+      const r = await API.post(`/pools/${pool.id}/invite-code/refresh`);
+      inviteLink = `${location.origin}/#/join/${r.code}`;
+      document.getElementById('invite-link-display').textContent = inviteLink;
+      toast('Invite link refreshed. Old link is now invalid.', 'success');
+    } catch(err) { toast(err.message,'error'); }
+  });
+
+  content.querySelectorAll('.btn-remove-member').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const uid = btn.dataset.uid;
+      const name = btn.dataset.name;
+      try {
+        await API.delete(`/pools/${pool.id}/members/${uid}`);
+        toast(`${name} removed.`, 'success');
+        poolState.members = poolState.members.filter(m=>m.id!==uid);
+        poolState.pool.member_count = Math.max(1, poolState.pool.member_count-1);
+        document.getElementById('members-list').innerHTML = poolState.members.map(m=>memberRow(m,isOwner,pool.created_by)).join('');
+        // Re-attach listeners
+        content.querySelectorAll('.btn-remove-member').forEach(b=>b.addEventListener('click',()=>{}));
+        await renderMembersTab();
+      } catch(err) { toast(err.message,'error'); }
+    });
+  });
+}
+
+function memberRow(m, isOwner, createdBy) {
+  const isPoolOwner = m.id === createdBy;
+  const canRemove = isOwner && !isPoolOwner && m.id !== currentUser?.id;
+  return `
+    <div class="member-row">
+      <div class="member-avatar">${esc(initial(m.display_name))}</div>
+      <div class="member-info">
+        <div class="member-name">${esc(m.display_name)} ${m.id===currentUser?.id?'<span style="font-size:11px;color:var(--text-muted)">(you)</span>':''}</div>
+        <div class="member-joined">Joined ${fmtDate(m.joined_at)}</div>
+      </div>
+      <div class="member-actions">
+        <span class="badge ${isPoolOwner?'badge-owner':'badge-contributor'}">${isPoolOwner?'Owner':'Contributor'}</span>
+        ${canRemove ? `<button class="btn btn-ghost btn-sm btn-remove-member" data-uid="${esc(m.id)}" data-name="${esc(m.display_name)}">Remove</button>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+// ===== JOIN VIEW =====
+async function renderJoin(code) {
+  if (!currentUser) {
+    sessionStorage.setItem('np_pending_join', code);
+    Router.go('/auth');
+    return;
+  }
+  loadingView();
+  try {
+    const r = await API.post(`/join/${code}`);
+    if (r.alreadyMember) {
+      toast(`You're already in "${r.poolName}".`, 'info');
+    } else {
+      toast(`Joined "${r.poolName}"! Welcome.`, 'success');
+    }
+    Router.go(`/pool/${r.poolId}`);
+  } catch(err) {
+    setApp(`
+      <div class="view" style="max-width:480px;margin:60px auto;text-align:center">
+        <div class="error-banner" style="margin-bottom:20px">${esc(err.message)}</div>
+        <button class="btn btn-ghost" onclick="Router.go('/pools')">← Go to My Pools</button>
+      </div>
+    `);
+  }
+}
+
+// ===== BROWSE VIEW =====
+let browseState = { query:'', pools:[], total:0, offset:0 };
+
+async function renderBrowse(query='', offset=0) {
+  if (!offset) loadingView();
+  const data = await API.get(`/browse?q=${encodeURIComponent(query)}&limit=24&offset=${offset}`);
+  browseState = { query, pools: offset ? [...browseState.pools, ...data.pools] : data.pools, total: data.total, offset };
+
+  setApp(`
+    <div class="view view-wide">
+      <div class="page-header">
+        <div class="page-header-left">
+          <h1>Browse Pools</h1>
+          <p>Discover published suggestion pools and add ideas to your own</p>
+        </div>
+      </div>
+      <div class="browse-search-row">
+        <input class="input" type="search" id="browse-search" placeholder="Search pools…" value="${esc(query)}"/>
+        <button class="btn btn-ghost" id="browse-search-btn">Search</button>
+      </div>
+      <div class="browse-stats">${data.total} published pool${data.total!==1?'s':''}</div>
+      ${browseState.pools.length === 0
+        ? `<div class="browse-empty"><div class="empty-icon">🌍</div><p style="font-size:14px;color:var(--text-dim)">No published pools yet${query?` matching "${esc(query)}"`:''}</p></div>`
+        : `<div class="pools-grid">${browseState.pools.map(browseCard).join('')}</div>`
+      }
+      ${browseState.pools.length < data.total ? `<div style="text-align:center;margin-top:24px"><button class="btn btn-ghost" id="load-more-btn">Load more</button></div>` : ''}
+    </div>
+  `);
+
+  const searchInput = document.getElementById('browse-search');
+  const doSearch = () => renderBrowse(searchInput.value.trim());
+  document.getElementById('browse-search-btn').onclick = doSearch;
+  searchInput.addEventListener('keydown', e => { if(e.key==='Enter') doSearch(); });
+  document.getElementById('load-more-btn')?.addEventListener('click', () => renderBrowse(browseState.query, browseState.offset+24));
+}
+
+function browseCard(p) {
+  const total = p.suggestion_count || 0;
+  return `
+    <div class="browse-card" onclick="renderBrowsePool('${esc(p.id)}')">
+      <div>
+        <div class="browse-card-title">${esc(p.name)}</div>
+        ${p.description ? `<div class="browse-card-desc">${esc(p.description)}</div>` : ''}
+      </div>
+      <div class="browse-card-meta">
+        <span class="browse-meta-item">👤 ${esc(p.creator_name)}</span>
+        <span class="browse-meta-item">👥 ${p.member_count} member${p.member_count!==1?'s':''}</span>
+        <span class="browse-meta-item">💡 ${total} suggestion${total!==1?'s':''}</span>
+      </div>
+      <div class="browse-card-footer">
+        <span class="badge badge-published">● Published</span>
+        <span class="btn btn-ghost btn-sm">View →</span>
+      </div>
+    </div>
+  `;
+}
+
+async function renderBrowsePool(id) {
+  loadingView();
+  const [pool, suggestions] = await Promise.all([API.get(`/pools/${id}`), API.get(`/pools/${id}/suggestions`)]);
+
+  // Load my pools for the "copy" feature
+  let myPools = [];
+  try { myPools = await API.get('/pools'); } catch {}
+
+  let activecat = CATEGORIES[0].id;
+
+  const renderBrowseSuggestions = () => {
+    const cat = catById(activecat);
+    const catSuggestions = suggestions.filter(s => s.category_id === activecat);
+    const area = document.getElementById('browse-suggestions-area');
+    if (!area) return;
+    if (catSuggestions.length === 0) {
+      area.innerHTML = `<div class="empty-state"><div class="empty-icon">${cat.icon}</div><p class="empty-primary">No ${cat.label.toLowerCase()} suggestions</p></div>`;
+      return;
+    }
+    area.innerHTML = `
+      <div class="suggestions-grid">
+        ${catSuggestions.map(s => `
+          <div class="suggestion-card" style="${catVars(cat)}">
+            <div class="suggestion-content">
+              <div class="suggestion-text">${esc(s.text)}</div>
+              <div class="suggestion-meta">
+                <span class="suggestion-user">${esc(s.added_by_name)}</span>
+                <span class="suggestion-dot"></span>
+                <span class="suggestion-date">${fmtShort(s.created_at)}</span>
+              </div>
+            </div>
+            ${currentUser ? `<button class="copy-btn" data-text="${esc(s.text)}" data-cat="${esc(s.category_id)}" title="Add to my pool">+</button>` : ''}
+          </div>
+        `).join('')}
+      </div>
+    `;
+    area.querySelectorAll('.copy-btn').forEach(btn => {
+      btn.onclick = () => openAddToMyPoolModal(btn.dataset.text, btn.dataset.cat, myPools);
+    });
+  };
+
+  const totalCount = Object.values(pool.counts||{}).reduce((a,b)=>a+b,0);
+
+  setApp(`
+    <div class="view">
+      <button class="back-link" onclick="renderBrowse('${esc(browseState.query||'')}')">← Back to Browse</button>
+      <div class="pool-header">
+        <div class="pool-header-top">
+          <div class="pool-header-info">
+            <div class="pool-title">${esc(pool.name)}</div>
+            ${pool.description?`<div class="pool-desc">${esc(pool.description)}</div>`:''}
+            <div class="pool-header-badges">
+              <span class="badge badge-published">● Published</span>
+              <span class="pool-stat">👤 by ${esc(pool.creator_name)}</span>
+              <span class="pool-stat">👥 ${pool.member_count} member${pool.member_count!==1?'s':''}</span>
+              <span class="pool-stat">💡 ${totalCount} suggestions</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="pool-tabs">
+        <button class="pool-tab active" id="bptab-suggest" onclick="switchBrowseTab('suggest')">Suggestions</button>
+        <button class="pool-tab" id="bptab-generate" onclick="switchBrowseTab('generate')">Generate</button>
+      </div>
+
+      <div id="browse-tab-content">
+        <div class="category-tabs" id="browse-cat-tabs"></div>
+        ${currentUser ? `<div class="readonly-notice">💡 Click <strong>+</strong> on any suggestion to copy it into one of your own pools.</div>` : ''}
+        <div id="browse-suggestions-area"></div>
+      </div>
+    </div>
+  `);
+
+  // Wire up category tabs
+  const renderBrowseCatTabs = () => {
+    const tabs = document.getElementById('browse-cat-tabs');
+    if (!tabs) return;
+    tabs.innerHTML = CATEGORIES.map(cat=>`
+      <button class="tab-btn ${activecat===cat.id?'active':''}" style="${catVars(cat)}" data-cat="${cat.id}">
+        <span class="tab-icon">${cat.icon}</span>${cat.label}
+        <span class="tab-count">${pool.counts?.[cat.id]||0}</span>
+      </button>
+    `).join('');
+    tabs.querySelectorAll('.tab-btn').forEach(btn=>{
+      btn.onclick=()=>{ activecat=btn.dataset.cat; renderBrowseCatTabs(); renderBrowseSuggestions(); };
+    });
+  };
+
+  window.switchBrowseTab = (tab) => {
+    document.querySelectorAll('.pool-tab').forEach(b=>b.classList.remove('active'));
+    document.getElementById(`bptab-${tab}`)?.classList.add('active');
+    const c=document.getElementById('browse-tab-content');
+    if (tab==='suggest') {
+      c.innerHTML=`<div class="category-tabs" id="browse-cat-tabs"></div>${currentUser?`<div class="readonly-notice">💡 Click <strong>+</strong> on any suggestion to copy it into one of your own pools.</div>`:''}<div id="browse-suggestions-area"></div>`;
+      renderBrowseCatTabs(); renderBrowseSuggestions();
+    } else {
+      const hasModifiers = CATEGORIES.some(c => c.isModifier);
+      c.innerHTML = `
+        <div class="generate-controls">
+          <div class="gen-ctrl">
+            <span class="control-label">Combinations</span>
+            <input type="number" class="count-input" id="b-combo-count" value="5" min="1" max="50"/>
+          </div>
+          <div class="control-divider"></div>
+          <div class="gen-ctrl">
+            <span class="control-label">Allow repeats</span>
+            <div class="toggle-wrapper">
+              <label class="toggle"><input type="checkbox" id="b-replacement-toggle" checked><span class="toggle-track"><span class="toggle-thumb"></span></span></label>
+              <span class="toggle-label" id="b-toggle-label">Yes — same item can repeat</span>
+            </div>
+          </div>
+          ${hasModifiers ? `
+          <div class="control-divider"></div>
+          <div class="gen-ctrl">
+            <span class="control-label">Activity modifiers</span>
+            <div class="toggle-wrapper">
+              <label class="toggle"><input type="checkbox" id="b-modifier-toggle"><span class="toggle-track"><span class="toggle-thumb"></span></span></label>
+              <span class="toggle-label" id="b-modifier-label">Excluded</span>
+            </div>
+          </div>
+          <div class="chance-row" id="b-chance-row" style="display:none">
+            <span class="control-label">Modifier chance</span>
+            <div style="display:flex;align-items:center;gap:10px">
+              <input type="range" class="chance-slider" id="b-chance-slider" min="0" max="100" value="50"/>
+              <span class="chance-display" id="b-chance-display">50%</span>
+            </div>
+          </div>
+          ` : ''}
+          <button class="btn-generate" id="b-generate-btn">Generate</button>
+          <button class="btn-reshuffle" id="b-reshuffle-btn" style="display:none">Reshuffle</button>
+        </div>
+        <div id="b-results-area"><div class="generate-placeholder"><div class="placeholder-glyph">✦</div><p class="placeholder-text">Click Generate</p></div></div>
+      `;
+      const tgl = document.getElementById('b-replacement-toggle');
+      const lbl = document.getElementById('b-toggle-label');
+      tgl.onchange = () => { lbl.textContent = tgl.checked ? 'Yes — same item can repeat' : 'No — each item used once'; };
+      if (hasModifiers) {
+        const modTgl = document.getElementById('b-modifier-toggle');
+        const modLbl = document.getElementById('b-modifier-label');
+        const chanceRow = document.getElementById('b-chance-row');
+        const chanceSlider = document.getElementById('b-chance-slider');
+        const chanceDisplay = document.getElementById('b-chance-display');
+        modTgl.onchange = () => {
+          modLbl.textContent = modTgl.checked ? 'Included' : 'Excluded';
+          chanceRow.style.display = modTgl.checked ? '' : 'none';
+        };
+        chanceSlider.oninput = () => { chanceDisplay.textContent = `${chanceSlider.value}%`; };
+      }
+      const doGen = () => {
+        const cnt = Math.max(1, Math.min(50, parseInt(document.getElementById('b-combo-count').value)||5));
+        const wr  = document.getElementById('b-replacement-toggle').checked;
+        const incMod = hasModifiers && document.getElementById('b-modifier-toggle').checked;
+        const modChance = hasModifiers ? parseInt(document.getElementById('b-chance-slider')?.value ?? 50) : 0;
+        runGenerate(cnt, wr, incMod, modChance, suggestions, 'b-results-area', 'b-reshuffle-btn');
+      };
+      document.getElementById('b-generate-btn').onclick = doGen;
+      document.getElementById('b-reshuffle-btn').onclick = doGen;
+    }
+  };
+
+  renderBrowseCatTabs();
+  renderBrowseSuggestions();
+}
+
+function openAddToMyPoolModal(text, categoryId, myPools) {
+  const cat = catById(categoryId);
+  if (!myPools || myPools.length === 0) {
+    openModal(`
+      <button class="modal-close">×</button>
+      <div class="modal-title">Add to my pool</div>
+      <div class="no-pools-msg">You don't have any pools yet.<br/><br/><button class="btn btn-primary" onclick="closeModal();openCreatePoolModal()">Create a pool first</button></div>
+    `);
+    return;
+  }
+  openModal(`
+    <button class="modal-close">×</button>
+    <div class="modal-title">Add to my pool</div>
+    <p style="font-size:13px;color:var(--text-dim);margin-bottom:14px">Adding <strong>${esc(cat.icon)} ${esc(text)}</strong> as a ${esc(cat.label)}.</p>
+    <div class="pool-options">
+      ${myPools.map(p=>`
+        <button class="pool-option" data-pool-id="${esc(p.id)}" data-pool-name="${esc(p.name)}">
+          <div style="flex:1;min-width:0">
+            <div class="pool-option-name">${esc(p.name)}</div>
+            <div class="pool-option-meta">${p.counts?.[categoryId]||0} ${esc(cat.label.toLowerCase())}s · ${p.member_count} member${p.member_count!==1?'s':''}${!p.allow_duplicates?'<span class="pool-option-nodup">No duplicates</span>':''}</div>
+          </div>
+          <span class="pool-option-arrow">→</span>
+        </button>
+      `).join('')}
+    </div>
+  `, (modal) => {
+    modal.querySelectorAll('.pool-option').forEach(btn => {
+      btn.onclick = async () => {
+        const poolId = btn.dataset.poolId;
+        const poolName = btn.dataset.poolName;
+        btn.disabled = true;
+        try {
+          await API.post(`/pools/${poolId}/suggestions`, { categoryId, text });
+          closeModal();
+          toast(`Added to "${poolName}"!`, 'success');
+        } catch(err) {
+          if (err.message?.toLowerCase().includes('similar suggestion')) {
+            // Inline duplicate error — no point retrying on the same pool
+            btn.classList.add('pool-option-rejected');
+            btn.querySelector('.pool-option-meta').innerHTML =
+              `<span class="pool-option-dup-err">✗ Already exists in this pool</span>`;
+            btn.querySelector('.pool-option-arrow').style.display = 'none';
+          } else {
+            toast(err.message, 'error');
+            btn.disabled = false;
+          }
+        }
+      };
+    });
+  });
+}
+
+// ===== INIT =====
+async function init() {
+  window.addEventListener('hashchange', () => Router.dispatch());
+  await Auth.init();
+  await Router.dispatch();
+}
+
+init();

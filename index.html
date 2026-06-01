@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NightPick</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <nav>
+    <div class="nav-brand">NightPick</div>
+    <ul class="nav-links">
+      <li><button class="nav-link active" data-page="suggest">Suggest</button></li>
+      <li><button class="nav-link" data-page="generate">Generate</button></li>
+    </ul>
+    <div class="nav-user" id="nav-user"></div>
+  </nav>
+
+  <main>
+
+    <!-- ===== SUGGEST PAGE ===== -->
+    <section id="page-suggest" class="page active">
+      <div class="page-header">
+        <h1 class="page-title">Add Suggestions</h1>
+        <p class="page-subtitle">Contribute ideas for your next night out</p>
+      </div>
+
+      <div class="user-bar">
+        <div class="user-bar-icon">👤</div>
+        <label for="user-id-input">Your name</label>
+        <input type="text" id="user-id-input" placeholder="Enter your name…" maxlength="30" autocomplete="off" />
+        <span class="user-bar-hint">Attached to each suggestion you submit</span>
+      </div>
+
+      <div class="category-tabs" id="category-tabs"></div>
+
+      <div class="add-form" id="add-form">
+        <span class="add-form-icon" id="add-form-icon"></span>
+        <input type="text" id="suggestion-input" placeholder="Type a suggestion…" maxlength="120" autocomplete="off" />
+        <button class="btn-add" id="add-btn">Add</button>
+      </div>
+
+      <div id="suggestions-section"></div>
+    </section>
+
+    <!-- ===== GENERATE PAGE ===== -->
+    <section id="page-generate" class="page">
+      <div class="page-header">
+        <h1 class="page-title">Generate Combinations</h1>
+        <p class="page-subtitle">Random picks assembled from your suggestions</p>
+      </div>
+
+      <div class="generate-controls">
+        <div class="control-group">
+          <label class="control-label">Combinations</label>
+          <input type="number" class="count-input" id="combo-count" value="5" min="1" max="50" />
+        </div>
+
+        <div class="control-divider"></div>
+
+        <div class="control-group">
+          <label class="control-label">Allow repeats</label>
+          <div class="toggle-wrapper">
+            <label class="toggle">
+              <input type="checkbox" id="replacement-toggle" checked />
+              <span class="toggle-track">
+                <span class="toggle-thumb"></span>
+              </span>
+            </label>
+            <span class="toggle-label" id="toggle-label">Yes — same item can appear multiple times</span>
+          </div>
+        </div>
+
+        <button class="btn-generate" id="generate-btn">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" class="btn-generate-icon">
+            <path d="M2 8a6 6 0 1 0 12 0A6 6 0 0 0 2 8Z" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M8 5v3l2 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          Generate
+        </button>
+
+        <button class="btn-reshuffle" id="reshuffle-btn" style="display:none">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M1 4h10M1 4l3-3M1 4l3 3M15 12H5M15 12l-3-3M15 12l-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Reshuffle
+        </button>
+      </div>
+
+      <div id="results-area">
+        <div class="generate-placeholder">
+          <div class="placeholder-glyph">✦</div>
+          <p class="placeholder-text">Set your options and click Generate</p>
+          <p class="placeholder-sub">Your suggestions will be randomly combined</p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

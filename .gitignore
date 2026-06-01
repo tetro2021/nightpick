@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Database (auto-created on first run)
+*.db
+*.db-shm
+*.db-wal
+
+# JWT secret (auto-generated on first run)
+.jwt_secret
+
+# Local IDE / tool config
+.claude/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
