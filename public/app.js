@@ -375,6 +375,7 @@ function renderPoolShell() {
         <button class="pool-tab active" id="ptab-suggest" onclick="switchPoolTab('suggest')">Suggest</button>
         <button class="pool-tab" id="ptab-generate" onclick="switchPoolTab('generate')">Generate</button>
         ${isMember ? `<button class="pool-tab" id="ptab-members" onclick="switchPoolTab('members')">Members</button>` : ''}
+        ${isMember ? `<button class="pool-tab" id="ptab-saved" onclick="switchPoolTab('saved')">Saved</button>` : ''}
       </div>
 
       <div id="pool-tab-content"></div>
@@ -538,6 +539,7 @@ async function renderPoolTab(tab) {
   if (tab === 'suggest') renderSuggestTab();
   else if (tab === 'generate') renderGenerateTab();
   else if (tab === 'members') await renderMembersTab();
+  else if (tab === 'saved') await renderSavedTab();
 }
 
 // ===== SUGGEST TAB =====
@@ -670,9 +672,11 @@ function renderSuggestions() {
 
 // ===== GENERATE TAB =====
 let lastGenSettings = null;
+let lastGeneratedData = null;
 
 function renderGenerateTab() {
   const hasModifiers = CATEGORIES.some(c => c.isModifier);
+  const colCats = CATEGORIES.filter(c => !c.isModifier);
   const lgs = lastGenSettings || {};
   const content = document.getElementById('pool-tab-content');
   content.innerHTML = `
@@ -690,6 +694,19 @@ function renderGenerateTab() {
             <span class="toggle-track"><span class="toggle-thumb"></span></span>
           </label>
           <span class="toggle-label" id="toggle-label">${lgs.withReplacement!==false?'Yes — same item can repeat':'No — each item used once'}</span>
+        </div>
+      </div>
+      <div class="control-divider"></div>
+      <div class="gen-ctrl">
+        <span class="control-label">Per combination</span>
+        <div class="cat-counts-row">
+          ${colCats.map(cat=>`
+            <div class="cat-count-item" style="${catVars(cat)}">
+              <span class="cat-count-icon">${cat.icon}</span>
+              <input type="number" class="cat-count-input" id="cat-count-${cat.id}"
+                     value="${lgs.catCounts?.[cat.id]||1}" min="1" max="10"/>
+            </div>
+          `).join('')}
         </div>
       </div>
       ${hasModifiers ? `
@@ -720,6 +737,7 @@ function renderGenerateTab() {
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M1 4h10M1 4l3-3M1 4l3 3M15 12H5M15 12l-3-3M15 12l-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         Reshuffle
       </button>
+      ${poolState.pool?.my_role === 'owner' ? `<button class="btn-save-combo" id="save-combo-btn" style="display:none">💾 Save</button>` : ''}
     </div>
     <div id="results-area">
       <div class="generate-placeholder">
@@ -737,9 +755,9 @@ function renderGenerateTab() {
   });
 
   if (hasModifiers) {
-    const modToggle   = document.getElementById('modifier-toggle');
-    const modLabel    = document.getElementById('modifier-label');
-    const chanceRow   = document.getElementById('chance-row');
+    const modToggle    = document.getElementById('modifier-toggle');
+    const modLabel     = document.getElementById('modifier-label');
+    const chanceRow    = document.getElementById('chance-row');
     const chanceSlider = document.getElementById('chance-slider');
     const chanceDisplay = document.getElementById('chance-display');
     modToggle.addEventListener('change', () => {
@@ -756,23 +774,63 @@ function renderGenerateTab() {
     const withReplacement = document.getElementById('replacement-toggle').checked;
     const includeModifiers = hasModifiers && document.getElementById('modifier-toggle').checked;
     const modifierChance = hasModifiers ? parseInt(document.getElementById('chance-slider')?.value ?? 50) : 0;
-    lastGenSettings = { count, withReplacement, includeModifiers, modifierChance };
-    runGenerate(count, withReplacement, includeModifiers, modifierChance);
+    const catCounts = {};
+    colCats.forEach(cat => {
+      catCounts[cat.id] = Math.max(1, Math.min(10, parseInt(document.getElementById(`cat-count-${cat.id}`)?.value || 1)));
+    });
+    lastGenSettings = { count, withReplacement, includeModifiers, modifierChance, catCounts };
+    runGenerate(count, withReplacement, includeModifiers, modifierChance, catCounts);
   };
 
   document.getElementById('generate-btn').addEventListener('click', doGenerate);
   document.getElementById('reshuffle-btn').addEventListener('click', doGenerate);
 
+  document.getElementById('save-combo-btn')?.addEventListener('click', () => {
+    if (!lastGeneratedData) return;
+    const pool = poolState.pool;
+    const defaultLabel = new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    openModal(`
+      <button class="modal-close">×</button>
+      <div class="modal-title">Save combination set</div>
+      <div class="field">
+        <label>Label</label>
+        <input class="input" id="save-label-input" placeholder="e.g. Friday Night Picks" maxlength="80" value="${esc(defaultLabel)}"/>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" id="confirm-save-combo">Save</button>
+      </div>
+    `, (modal) => {
+      const inp = modal.querySelector('#save-label-input');
+      inp.focus(); inp.select();
+      modal.querySelector('#confirm-save-combo').onclick = async () => {
+        const btn = modal.querySelector('#confirm-save-combo');
+        btn.disabled = true; btn.textContent = 'Saving…';
+        try {
+          await API.post(`/pools/${pool.id}/saved-combos`, { label: inp.value.trim(), data: lastGeneratedData });
+          closeModal();
+          toast('Combination set saved!', 'success');
+          const sb = document.getElementById('save-combo-btn');
+          if (sb) { sb.disabled = true; setTimeout(() => { sb.disabled = false; }, 8000); }
+        } catch(err) { toast(err.message, 'error'); btn.disabled = false; btn.textContent = 'Save'; }
+      };
+    });
+  });
+
   if (lastGenSettings) doGenerate();
 }
 
-function runGenerate(count, withReplacement, includeModifiers=false, modifierChance=50, suggOverride=null, resultsId='results-area', reshuffleId='reshuffle-btn') {
+function runGenerate(count, withReplacement, includeModifiers=false, modifierChance=50, catCounts=null, suggOverride=null, resultsId='results-area', reshuffleId='reshuffle-btn') {
   const suggestions = suggOverride || poolState.suggestions;
   const resultsArea = document.getElementById(resultsId);
   const reshuffleBtn = document.getElementById(reshuffleId);
 
   const colCats = CATEGORIES.filter(c => !c.isModifier);
   const modCat  = CATEGORIES.find(c => c.isModifier);
+
+  // Per-category pick counts (default 1)
+  const cc = {};
+  colCats.forEach(cat => { cc[cat.id] = Math.max(1, catCounts?.[cat.id] || 1); });
 
   const pools = {};
   let anyEmpty = false;
@@ -788,9 +846,16 @@ function runGenerate(count, withReplacement, includeModifiers=false, modifierCha
     return;
   }
 
-  const minPoolSize = Math.min(...colCats.map(cat => pools[cat.id].length));
+  // Max no-repeat combos = floor(poolSize / picksPerRow) for the most constrained category
+  const minPoolSize = Math.min(...colCats.map(cat => Math.floor(pools[cat.id].length / cc[cat.id])));
   const actualCount = withReplacement ? count : Math.min(count, minPoolSize);
   const truncated = !withReplacement && actualCount < count;
+
+  if (!withReplacement && actualCount === 0) {
+    resultsArea.innerHTML = `<div class="error-banner">⚠ Not enough unique suggestions for the selected per-combination counts — add more or enable "Allow repeats".</div>`;
+    reshuffleBtn.style.display = 'none';
+    return;
+  }
 
   // Build shuffled modifier pool for no-repeat depletion
   let modifierPool = [];
@@ -799,18 +864,21 @@ function runGenerate(count, withReplacement, includeModifiers=false, modifierCha
     modifierPool = shuffle(suggestions.filter(s => s.category_id === modCat.id));
   }
 
-  // Activity cell is the first non-modifier category whose id === 'activity', or fallback to first col
   const actCat = colCats.find(c => c.id === 'activity') || colCats[0];
 
   const combos = [];
   for (let i = 0; i < actualCount; i++) {
     const row = {};
     colCats.forEach(cat => {
-      row[cat.id] = withReplacement
-        ? pools[cat.id][Math.floor(Math.random() * pools[cat.id].length)]
-        : pools[cat.id][i];
+      const n = cc[cat.id];
+      if (withReplacement) {
+        row[cat.id] = Array.from({length: n}, () =>
+          pools[cat.id][Math.floor(Math.random() * pools[cat.id].length)]);
+      } else {
+        row[cat.id] = pools[cat.id].slice(i * n, i * n + n);
+      }
     });
-    // Each row independently rolls for a modifier on the activity cell
+    // Roll once per row for a modifier on the primary activity item
     row._modifier = null;
     if (includeModifiers && modCat && modifierPool.length > 0) {
       if (Math.random() * 100 < modifierChance) {
@@ -834,7 +902,7 @@ function runGenerate(count, withReplacement, includeModifiers=false, modifierCha
     </div>
     <div class="combo-grid-header" style="grid-template-columns:${colTemplate}">
       <div></div>
-      ${colCats.map(cat=>`<div class="combo-col-header" style="${catVars(cat)}">${cat.icon} ${esc(cat.label)}</div>`).join('')}
+      ${colCats.map(cat=>`<div class="combo-col-header" style="${catVars(cat)}">${cat.icon} ${esc(cat.label)}${cc[cat.id]>1?` <span style="opacity:.55">×${cc[cat.id]}</span>`:''}</div>`).join('')}
     </div>
     <div class="combo-grid">
       ${combos.map((row,i)=>`
@@ -842,10 +910,14 @@ function runGenerate(count, withReplacement, includeModifiers=false, modifierCha
           <div class="combo-row-number">${i+1}</div>
           ${colCats.map(cat=>`
             <div class="combo-cell" style="${catVars(cat)}">
-              <div class="combo-cell-label">${esc(cat.label)}</div>
-              <div class="combo-cell-text">${esc(row[cat.id].text)}</div>
-              ${cat.id === actCat.id && row._modifier ? `<div class="combo-modifier-pill" style="--mod-color:${modCat.color}">${esc(modCat.icon)} ${esc(row._modifier.text)}</div>` : ''}
-              <div class="combo-cell-user">by ${esc(row[cat.id].added_by_name)}</div>
+              <div class="combo-cell-label">${esc(cat.label)}${cc[cat.id]>1?`<span class="cell-count-badge"> ×${cc[cat.id]}</span>`:''}</div>
+              ${row[cat.id].map((item, idx)=>`
+                <div class="combo-cell-item${cc[cat.id]>1?' multi':''}">
+                  <div class="combo-cell-text">${esc(item.text)}</div>
+                  ${cat.id===actCat.id&&idx===0&&row._modifier?`<div class="combo-modifier-pill" style="--mod-color:${modCat.color}">${esc(modCat.icon)} ${esc(row._modifier.text)}</div>`:''}
+                  <div class="combo-cell-user">by ${esc(item.added_by_name)}</div>
+                </div>
+              `).join('')}
             </div>
           `).join('')}
         </div>
@@ -854,6 +926,9 @@ function runGenerate(count, withReplacement, includeModifiers=false, modifierCha
   `;
   resultsArea.innerHTML = html;
   reshuffleBtn.style.display = 'flex';
+  // Store for Save feature; expose Save button if present
+  lastGeneratedData = { settings: { count, withReplacement, includeModifiers, modifierChance, catCounts: cc }, combos };
+  document.getElementById('save-combo-btn')?.style.setProperty('display', 'flex');
 }
 
 // ===== MEMBERS TAB =====
@@ -936,6 +1011,90 @@ function memberRow(m, isOwner, createdBy) {
       </div>
     </div>
   `;
+}
+
+// ===== SAVED COMBOS TAB =====
+function renderSavedComboSet(data) {
+  if (!data?.combos?.length) return '<p style="font-size:13px;color:var(--text-muted);padding:12px 0">No combinations in this set.</p>';
+  const colCats = CATEGORIES.filter(c => !c.isModifier);
+  const modCat  = CATEGORIES.find(c => c.isModifier);
+  const actCat  = colCats.find(c => c.id === 'activity') || colCats[0];
+  const cc = {};
+  colCats.forEach(cat => { cc[cat.id] = data.settings?.catCounts?.[cat.id] || 1; });
+  const colTemplate = `36px repeat(${colCats.length},1fr)`;
+  return `
+    <div class="results-meta">
+      <span class="results-count">${data.combos.length} combination${data.combos.length!==1?'s':''}</span>
+      <span class="results-mode">${data.settings?.withReplacement?'with repeats':'no repeats'}</span>
+    </div>
+    <div class="combo-grid-header" style="grid-template-columns:${colTemplate}">
+      <div></div>
+      ${colCats.map(cat=>`<div class="combo-col-header" style="${catVars(cat)}">${cat.icon} ${esc(cat.label)}${cc[cat.id]>1?` <span style="opacity:.55">×${cc[cat.id]}</span>`:''}</div>`).join('')}
+    </div>
+    <div class="combo-grid">
+      ${data.combos.map((row,i)=>`
+        <div class="combo-row" style="grid-template-columns:${colTemplate};animation-delay:${i*40}ms">
+          <div class="combo-row-number">${i+1}</div>
+          ${colCats.map(cat=>`
+            <div class="combo-cell" style="${catVars(cat)}">
+              <div class="combo-cell-label">${esc(cat.label)}${cc[cat.id]>1?`<span class="cell-count-badge"> ×${cc[cat.id]}</span>`:''}</div>
+              ${(row[cat.id]||[]).map((item, idx)=>`
+                <div class="combo-cell-item${cc[cat.id]>1?' multi':''}">
+                  <div class="combo-cell-text">${esc(item.text)}</div>
+                  ${cat.id===actCat.id&&idx===0&&row._modifier&&modCat?`<div class="combo-modifier-pill" style="--mod-color:${modCat.color}">${esc(modCat.icon)} ${esc(row._modifier.text)}</div>`:''}
+                  <div class="combo-cell-user">by ${esc(item.added_by_name)}</div>
+                </div>
+              `).join('')}
+            </div>
+          `).join('')}
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+async function renderSavedTab() {
+  const { pool } = poolState;
+  const isOwner = pool.my_role === 'owner';
+  const content = document.getElementById('pool-tab-content');
+  content.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+
+  let savedCombos = [];
+  try { savedCombos = await API.get(`/pools/${pool.id}/saved-combos`); } catch {}
+
+  if (savedCombos.length === 0) {
+    content.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">💾</div>
+        <p class="empty-primary">No saved combinations yet</p>
+        <p class="empty-sub">${isOwner ? 'Generate a set and click "💾 Save" to save it here.' : 'The pool owner hasn\'t saved any combinations yet.'}</p>
+      </div>`;
+    return;
+  }
+
+  content.innerHTML = `<div class="saved-combos-list">${savedCombos.map(sc=>`
+    <div class="saved-combo-card" data-id="${esc(sc.id)}">
+      <div class="saved-combo-header">
+        <div>
+          <div class="saved-combo-label">${esc(sc.label || 'Untitled set')}</div>
+          <div class="saved-combo-meta">Saved ${fmtDate(sc.created_at)} · ${sc.data.combos?.length||0} combination${(sc.data.combos?.length||0)!==1?'s':''}</div>
+        </div>
+        ${isOwner ? `<button class="btn btn-ghost btn-sm delete-saved-btn" data-id="${esc(sc.id)}">Delete</button>` : ''}
+      </div>
+      <div class="saved-combo-grid">${renderSavedComboSet(sc.data)}</div>
+    </div>
+  `).join('')}</div>`;
+
+  content.querySelectorAll('.delete-saved-btn').forEach(btn => {
+    btn.onclick = async () => {
+      try {
+        await API.delete(`/pools/${pool.id}/saved-combos/${btn.dataset.id}`);
+        btn.closest('.saved-combo-card').remove();
+        toast('Deleted.', 'success');
+        if (!document.querySelector('.saved-combo-card')) await renderSavedTab();
+      } catch(err) { toast(err.message, 'error'); }
+    };
+  });
 }
 
 // ===== JOIN VIEW =====
@@ -1085,6 +1244,7 @@ async function renderBrowsePool(id) {
       <div class="pool-tabs">
         <button class="pool-tab active" id="bptab-suggest" onclick="switchBrowseTab('suggest')">Suggestions</button>
         <button class="pool-tab" id="bptab-generate" onclick="switchBrowseTab('generate')">Generate</button>
+        <button class="pool-tab" id="bptab-saved" onclick="switchBrowseTab('saved')">Saved</button>
       </div>
 
       <div id="browse-tab-content">
@@ -1117,8 +1277,28 @@ async function renderBrowsePool(id) {
     if (tab==='suggest') {
       c.innerHTML=`<div class="category-tabs" id="browse-cat-tabs"></div>${currentUser?`<div class="readonly-notice">💡 Click <strong>+</strong> on any suggestion to copy it into one of your own pools.</div>`:''}<div id="browse-suggestions-area"></div>`;
       renderBrowseCatTabs(); renderBrowseSuggestions();
+    } else if (tab==='saved') {
+      c.innerHTML='<div class="loading"><div class="spinner"></div></div>';
+      API.get(`/pools/${pool.id}/saved-combos`).then(savedCombos => {
+        if (!savedCombos.length) {
+          c.innerHTML=`<div class="empty-state"><div class="empty-icon">💾</div><p class="empty-primary">No saved combinations</p><p class="empty-sub">The pool owner hasn't saved any combinations yet.</p></div>`;
+          return;
+        }
+        c.innerHTML=`<div class="saved-combos-list">${savedCombos.map(sc=>`
+          <div class="saved-combo-card">
+            <div class="saved-combo-header">
+              <div>
+                <div class="saved-combo-label">${esc(sc.label||'Untitled set')}</div>
+                <div class="saved-combo-meta">Saved ${fmtDate(sc.created_at)} · ${sc.data.combos?.length||0} combination${(sc.data.combos?.length||0)!==1?'s':''}</div>
+              </div>
+            </div>
+            <div class="saved-combo-grid">${renderSavedComboSet(sc.data)}</div>
+          </div>
+        `).join('')}</div>`;
+      }).catch(()=>{ c.innerHTML='<div class="error-banner">Could not load saved combinations.</div>'; });
     } else {
       const hasModifiers = CATEGORIES.some(c => c.isModifier);
+      const bColCats = CATEGORIES.filter(c => !c.isModifier);
       c.innerHTML = `
         <div class="generate-controls">
           <div class="gen-ctrl">
@@ -1131,6 +1311,18 @@ async function renderBrowsePool(id) {
             <div class="toggle-wrapper">
               <label class="toggle"><input type="checkbox" id="b-replacement-toggle" checked><span class="toggle-track"><span class="toggle-thumb"></span></span></label>
               <span class="toggle-label" id="b-toggle-label">Yes — same item can repeat</span>
+            </div>
+          </div>
+          <div class="control-divider"></div>
+          <div class="gen-ctrl">
+            <span class="control-label">Per combination</span>
+            <div class="cat-counts-row">
+              ${bColCats.map(cat=>`
+                <div class="cat-count-item" style="${catVars(cat)}">
+                  <span class="cat-count-icon">${cat.icon}</span>
+                  <input type="number" class="cat-count-input" id="b-cat-count-${cat.id}" value="1" min="1" max="10"/>
+                </div>
+              `).join('')}
             </div>
           </div>
           ${hasModifiers ? `
@@ -1175,7 +1367,11 @@ async function renderBrowsePool(id) {
         const wr  = document.getElementById('b-replacement-toggle').checked;
         const incMod = hasModifiers && document.getElementById('b-modifier-toggle').checked;
         const modChance = hasModifiers ? parseInt(document.getElementById('b-chance-slider')?.value ?? 50) : 0;
-        runGenerate(cnt, wr, incMod, modChance, suggestions, 'b-results-area', 'b-reshuffle-btn');
+        const bCatCounts = {};
+        bColCats.forEach(cat => {
+          bCatCounts[cat.id] = Math.max(1, Math.min(10, parseInt(document.getElementById(`b-cat-count-${cat.id}`)?.value || 1)));
+        });
+        runGenerate(cnt, wr, incMod, modChance, bCatCounts, suggestions, 'b-results-area', 'b-reshuffle-btn');
       };
       document.getElementById('b-generate-btn').onclick = doGen;
       document.getElementById('b-reshuffle-btn').onclick = doGen;
