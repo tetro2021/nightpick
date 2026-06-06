@@ -8,8 +8,10 @@ module.exports = {
       watch: false,
       max_memory_restart: '256M',
       env: {
-        NODE_ENV: 'production',
-        PORT: 3737,
+        NODE_ENV: process.env.NODE_ENV || 'production',
+        PORT: process.env.PORT || 3737,
+        INVITE_ONLY: process.env.INVITE_ONLY || 'false',
+        ADMIN_SECRET: process.env.ADMIN_SECRET,
       },
     },
   ],
