@@ -213,16 +213,17 @@ app.post('/api/auth/register', async (req, res) => {
 
   const id   = uid();
   const hash = await bcrypt.hash(password, 11);
-  // Store username in both the username column and the legacy email column so old JWTs still resolve
-  db.prepare('INSERT INTO users VALUES(?,?,?,?,?)').run(id, username.trim().toLowerCase(), displayName.trim(), hash, now());
-  db.prepare('UPDATE users SET username=? WHERE id=?').run(username.trim().toLowerCase(), id);
+  const uname = username.trim().toLowerCase();
+  // Store username in both the email column (legacy compat) and the username column
+  db.prepare('INSERT INTO users (id, email, display_name, password_hash, created_at, username) VALUES(?,?,?,?,?,?)')
+    .run(id, uname, displayName.trim(), hash, now(), uname);
 
   if (INVITE_ONLY && inviteCode?.trim())
     db.prepare('UPDATE invite_codes SET used_by=?, used_at=? WHERE code=?').run(id, now(), inviteCode.trim().toLowerCase());
 
   rle.count++; regRateLimit.set(ip, rle);
 
-  const payload = { id, username: username.trim().toLowerCase(), displayName: displayName.trim() };
+  const payload = { id, username: uname, displayName: displayName.trim() };
   res.json({ token: jwt.sign(payload, JWT_SECRET, { expiresIn: '60d' }), user: payload });
 });
 
