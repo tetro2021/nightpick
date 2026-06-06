@@ -42,10 +42,14 @@ const API = {
 let currentUser = null;
 
 const Auth = {
+  config: { inviteOnly: false },
+
   async init() {
+    try { this.config = await API.get('/config'); } catch {}
     if (!API.token) return;
     try { currentUser = await API.get('/auth/me'); } catch { API.setToken(null); }
   },
+
   signOut() {
     currentUser = null;
     API.setToken(null);
@@ -173,7 +177,7 @@ function renderAuthForm(mode) {
     area.innerHTML = `
       <form class="auth-form" id="signin-form">
         <div id="auth-error"></div>
-        <div class="field"><label>Email</label><input class="input" type="email" name="email" placeholder="you@example.com" required autocomplete="email"/></div>
+        <div class="field"><label>Username</label><input class="input" type="text" name="username" placeholder="your_username" required autocomplete="username" maxlength="20"/></div>
         <div class="field"><label>Password</label><input class="input" type="password" name="password" placeholder="••••••••" required autocomplete="current-password"/></div>
         <button class="btn btn-primary" type="submit" style="width:100%;justify-content:center">Sign in</button>
       </form>
@@ -184,7 +188,7 @@ function renderAuthForm(mode) {
       const btn = e.target.querySelector('button[type=submit]');
       btn.disabled = true; btn.textContent = 'Signing in…';
       try {
-        const r = await API.post('/auth/login', { email: fd.get('email'), password: fd.get('password') });
+        const r = await API.post('/auth/login', { username: fd.get('username'), password: fd.get('password') });
         API.setToken(r.token); currentUser = r.user;
         const pending = sessionStorage.getItem('np_pending_join');
         if (pending) { sessionStorage.removeItem('np_pending_join'); Router.go(`/join/${pending}`); }
@@ -195,12 +199,21 @@ function renderAuthForm(mode) {
       }
     };
   } else {
+    const inviteOnly = Auth.config?.inviteOnly;
     area.innerHTML = `
       <form class="auth-form" id="signup-form">
         <div id="auth-error"></div>
         <div class="field"><label>Display name</label><input class="input" type="text" name="displayName" placeholder="Your name" required maxlength="30"/></div>
-        <div class="field"><label>Email</label><input class="input" type="email" name="email" placeholder="you@example.com" required autocomplete="email"/></div>
+        <div class="field">
+          <label>Username</label>
+          <input class="input" type="text" name="username" placeholder="letters, numbers, underscores" required maxlength="20" autocomplete="username" pattern="[a-zA-Z0-9_]{3,20}" title="3–20 characters: letters, numbers, underscores only"/>
+        </div>
         <div class="field"><label>Password</label><input class="input" type="password" name="password" placeholder="Min 6 characters" required autocomplete="new-password" minlength="6"/></div>
+        ${inviteOnly ? `
+        <div class="field">
+          <label>Invite code</label>
+          <input class="input" type="text" name="inviteCode" placeholder="xxxxxxxx" required maxlength="8" autocomplete="off" style="letter-spacing:.12em;font-family:monospace"/>
+        </div>` : ''}
         <button class="btn btn-primary" type="submit" style="width:100%;justify-content:center">Create account</button>
       </form>
     `;
@@ -210,7 +223,12 @@ function renderAuthForm(mode) {
       const btn = e.target.querySelector('button[type=submit]');
       btn.disabled = true; btn.textContent = 'Creating account…';
       try {
-        const r = await API.post('/auth/register', { email: fd.get('email'), password: fd.get('password'), displayName: fd.get('displayName') });
+        const r = await API.post('/auth/register', {
+          username:    fd.get('username'),
+          password:    fd.get('password'),
+          displayName: fd.get('displayName'),
+          inviteCode:  fd.get('inviteCode') || undefined,
+        });
         API.setToken(r.token); currentUser = r.user;
         const pending = sessionStorage.getItem('np_pending_join');
         if (pending) { sessionStorage.removeItem('np_pending_join'); Router.go(`/join/${pending}`); }
