@@ -22,8 +22,10 @@ try {
 }
 
 const SUGGESTION_LIMIT = 100; // per category per pool
+const SAVED_COMBO_LIMIT = 50;  // saved sets per pool
+const SAVED_COMBO_MAX_BYTES = 500_000; // 500 KB — above any reachable UI maximum
 
-app.use(express.json());
+app.use(express.json({ limit: '500kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ===== DATABASE INIT =====
@@ -68,8 +70,18 @@ db.exec(`
     created_at    INTEGER NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS saved_combos (
+    id         TEXT PRIMARY KEY,
+    pool_id    TEXT NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
+    created_by TEXT NOT NULL REFERENCES users(id),
+    created_at INTEGER NOT NULL,
+    label      TEXT NOT NULL DEFAULT '',
+    data       TEXT NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS idx_suggestions_pool ON suggestions(pool_id, category_id);
   CREATE INDEX IF NOT EXISTS idx_members_user ON pool_members(user_id);
+  CREATE INDEX IF NOT EXISTS idx_saved_combos_pool ON saved_combos(pool_id, created_at);
 `);
 
 // Migration for existing databases
@@ -140,7 +152,7 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(400).json({ error: 'Email and password required.' });
   const user = db.prepare('SELECT * FROM users WHERE email=?').get(email.trim());
   if (!user || !(await bcrypt.compare(password, user.password_hash)))
-    return res.status(401).json({ error: 'Invalid email or password.' });
+    return res.status(400).json({ error: 'Invalid email or password.' });
 
   const payload = { id: user.id, email: user.email, displayName: user.display_name };
   res.json({ token: jwt.sign(payload, JWT_SECRET, { expiresIn: '60d' }), user: payload });
@@ -305,6 +317,52 @@ app.delete('/api/pools/:id/suggestions/:sid', auth, (req, res) => {
   if (!mem) return res.status(403).json({ error: 'Not a member.' });
   if (mem.role !== 'owner' && s.added_by !== req.user.id) return res.status(403).json({ error: 'You can only delete your own suggestions.' });
   db.prepare('DELETE FROM suggestions WHERE id=?').run(req.params.sid);
+  res.json({ ok: true });
+});
+
+// ===== SAVED COMBOS =====
+const saveRateLimit = new Map(); // userId → last-save timestamp
+
+app.get('/api/pools/:id/saved-combos', softAuth, (req, res) => {
+  const pool = db.prepare('SELECT is_published FROM pools WHERE id=?').get(req.params.id);
+  if (!pool) return res.status(404).json({ error: 'Pool not found.' });
+  const mem = req.user ? getMembership(req.params.id, req.user.id) : null;
+  if (!mem && !pool.is_published) return res.status(403).json({ error: 'Not a member.' });
+  const rows = db.prepare('SELECT * FROM saved_combos WHERE pool_id=? ORDER BY created_at DESC').all(req.params.id);
+  res.json(rows.map(r => ({ ...r, data: JSON.parse(r.data) })));
+});
+
+app.post('/api/pools/:id/saved-combos', auth, (req, res) => {
+  const mem = getMembership(req.params.id, req.user.id);
+  if (mem?.role !== 'owner') return res.status(403).json({ error: 'Owner only.' });
+
+  // Rate limit: 10-second cooldown per user
+  const lastT = saveRateLimit.get(req.user.id) || 0;
+  if (Date.now() - lastT < 10_000)
+    return res.status(429).json({ error: 'Please wait a moment before saving again.' });
+
+  const { label, data } = req.body ?? {};
+  if (!data || !Array.isArray(data.combos)) return res.status(400).json({ error: 'Invalid combo data.' });
+
+  // Payload size cap (500 KB)
+  if (JSON.stringify(data).length > SAVED_COMBO_MAX_BYTES)
+    return res.status(400).json({ error: 'Combo set is too large to save.' });
+
+  // Per-pool saved-set cap (50)
+  const existing = db.prepare('SELECT COUNT(*) as c FROM saved_combos WHERE pool_id=?').get(req.params.id).c;
+  if (existing >= SAVED_COMBO_LIMIT)
+    return res.status(429).json({ error: `Pools are limited to ${SAVED_COMBO_LIMIT} saved sets. Delete one to make room.` });
+
+  saveRateLimit.set(req.user.id, Date.now());
+  const id = uid(); const t = now();
+  db.prepare('INSERT INTO saved_combos VALUES(?,?,?,?,?,?)').run(id, req.params.id, req.user.id, t, label?.trim() ?? '', JSON.stringify(data));
+  res.json({ id, pool_id: req.params.id, created_by: req.user.id, created_at: t, label: label?.trim() ?? '', data });
+});
+
+app.delete('/api/pools/:id/saved-combos/:comboId', auth, (req, res) => {
+  const mem = getMembership(req.params.id, req.user.id);
+  if (mem?.role !== 'owner') return res.status(403).json({ error: 'Owner only.' });
+  db.prepare('DELETE FROM saved_combos WHERE id=? AND pool_id=?').run(req.params.comboId, req.params.id);
   res.json({ ok: true });
 });
 

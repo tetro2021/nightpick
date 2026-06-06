@@ -242,6 +242,17 @@ textarea.input{resize:vertical;min-height:72px}
 .chance-slider::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:#a598ff;cursor:pointer;border:none}
 .chance-display{font-size:14px;font-weight:700;color:var(--text);min-width:38px;text-align:right}
 
+.btn-save-combo{display:flex;align-items:center;gap:7px;padding:10px 16px;border-radius:var(--radius-sm);border:1px solid rgba(61,214,163,.3);background:var(--green-dim);color:var(--green);font-size:13px;font-weight:600;cursor:pointer;transition:background var(--t),border-color var(--t)}
+.btn-save-combo:hover{background:rgba(61,214,163,.2);border-color:rgba(61,214,163,.5)}
+
+/* saved combo cards */
+.saved-combos-list{display:flex;flex-direction:column;gap:20px}
+.saved-combo-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px 24px}
+.saved-combo-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:18px}
+.saved-combo-label{font-size:16px;font-weight:600;letter-spacing:-.3px;color:var(--text)}
+.saved-combo-meta{font-size:12px;color:var(--text-muted);margin-top:3px}
+.saved-combo-grid{}
+
 .generate-placeholder{text-align:center;padding:80px 24px;color:var(--text-muted)}
 .placeholder-glyph{font-size:48px;margin-bottom:18px;background:linear-gradient(135deg,#8b7ff5,#3dd6a3);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;opacity:.4}
 .placeholder-text{font-size:15px;font-weight:500;color:var(--text-dim);margin-bottom:5px}
@@ -263,7 +274,22 @@ textarea.input{resize:vertical;min-height:72px}
 .combo-cell:hover::after{opacity:1}
 .combo-cell-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--cat-color);margin-bottom:5px}
 .combo-cell-text{font-size:14.5px;font-weight:500;color:var(--text);line-height:1.35}
-.combo-cell-user{font-size:11px;color:var(--text-muted);margin-top:5px}
+.combo-cell-user{font-size:11px;color:var(--text-muted);margin-top:4px}
+
+/* multi-item cells */
+.combo-cell-item{padding-bottom:0}
+.combo-cell-item.multi{padding-bottom:9px;margin-bottom:9px;border-bottom:1px solid var(--border)}
+.combo-cell-item.multi:last-child{padding-bottom:0;margin-bottom:0;border-bottom:none}
+.cell-count-badge{font-size:10px;font-weight:700;opacity:.55;letter-spacing:.3px}
+
+/* per-combination count inputs */
+.cat-counts-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.cat-count-item{display:flex;align-items:center;gap:5px}
+.cat-count-icon{font-size:16px;line-height:1}
+.cat-count-input{width:52px;background:var(--surface-2);border:1px solid var(--cat-color,var(--border));border-radius:var(--radius-sm);padding:5px 8px;color:var(--text);font-size:16px;font-weight:700;outline:none;text-align:center;-moz-appearance:textfield;transition:border-color var(--t),box-shadow var(--t)}
+.cat-count-input::-webkit-inner-spin-button,.cat-count-input::-webkit-outer-spin-button{-webkit-appearance:none}
+.cat-count-input:focus{border-color:var(--cat-color);box-shadow:0 0 0 3px var(--cat-color-dim)}
+
 .combo-modifier-pill{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;background:rgba(244,114,182,0.12);color:var(--mod-color,#f472b6);border:1px solid rgba(244,114,182,0.28);margin-top:5px;margin-bottom:3px;letter-spacing:.1px}
 
 /* ===== MEMBERS TAB ===== */
