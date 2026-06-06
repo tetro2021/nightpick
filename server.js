@@ -21,9 +21,12 @@ try {
   fs.writeFileSync(SECRET_FILE, JWT_SECRET);
 }
 
-const SUGGESTION_LIMIT = 100; // per category per pool
-const SAVED_COMBO_LIMIT = 50;  // saved sets per pool
+const SUGGESTION_LIMIT    = 100;     // per category per pool
+const SAVED_COMBO_LIMIT   = 50;      // saved sets per pool
 const SAVED_COMBO_MAX_BYTES = 500_000; // 500 KB — above any reachable UI maximum
+const INVITE_ONLY         = process.env.INVITE_ONLY   === 'true';
+const ADMIN_SECRET        = process.env.ADMIN_SECRET  || null;
+const REG_PER_IP_PER_HOUR = 5;
 
 app.use(express.json({ limit: '500kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -79,13 +82,28 @@ db.exec(`
     data       TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS invite_codes (
+    code       TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL,
+    used_by    TEXT REFERENCES users(id),
+    used_at    INTEGER
+  );
+
   CREATE INDEX IF NOT EXISTS idx_suggestions_pool ON suggestions(pool_id, category_id);
   CREATE INDEX IF NOT EXISTS idx_members_user ON pool_members(user_id);
   CREATE INDEX IF NOT EXISTS idx_saved_combos_pool ON saved_combos(pool_id, created_at);
 `);
 
-// Migration for existing databases
+// Migrations for existing databases
 try { db.exec('ALTER TABLE pools ADD COLUMN allow_duplicates INTEGER NOT NULL DEFAULT 1'); } catch {}
+try { db.exec('ALTER TABLE users ADD COLUMN username TEXT COLLATE NOCASE'); } catch {}
+// Copy existing emails into username for any pre-migration accounts
+try { db.exec("UPDATE users SET username = email WHERE username IS NULL"); } catch {}
+try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username)'); } catch {}
+
+// In-memory rate limit maps (reset on server restart — acceptable for a small app)
+const regRateLimit  = new Map(); // IP     → { count, windowStart }
+const saveRateLimit = new Map(); // userId → last-save timestamp
 
 // ===== HELPERS =====
 const uid  = () => crypto.randomUUID();
@@ -128,38 +146,100 @@ function softAuth(req, res, next) {
   next();
 }
 
+function adminAuth(req, res, next) {
+  if (!ADMIN_SECRET) return res.status(503).json({ error: 'Admin endpoints not configured — set ADMIN_SECRET env var.' });
+  if (req.headers['x-admin-secret'] !== ADMIN_SECRET) return res.status(403).json({ error: 'Invalid admin secret.' });
+  next();
+}
+
+// ===== CONFIG =====
+app.get('/api/config', (req, res) => {
+  res.json({ inviteOnly: INVITE_ONLY });
+});
+
+// ===== ADMIN =====
+// Usage: POST /api/admin/invite-codes  { count: 5 }  with header X-Admin-Secret: <value>
+// Returns the generated codes as plain strings — share them however you like.
+app.post('/api/admin/invite-codes', adminAuth, (req, res) => {
+  const count = Math.max(1, Math.min(50, parseInt(req.body?.count) || 1));
+  const codes = [];
+  for (let i = 0; i < count; i++) {
+    const c = crypto.randomBytes(4).toString('hex'); // 8-char lowercase hex, easy to type
+    db.prepare('INSERT OR IGNORE INTO invite_codes VALUES(?,?,null,null)').run(c, now());
+    codes.push(c);
+  }
+  res.json({ codes });
+});
+
+app.get('/api/admin/invite-codes', adminAuth, (req, res) => {
+  const rows = db.prepare(`
+    SELECT ic.code, ic.created_at, ic.used_at, u.username as used_by
+    FROM invite_codes ic
+    LEFT JOIN users u ON u.id = ic.used_by
+    ORDER BY ic.created_at DESC
+  `).all();
+  res.json(rows);
+});
+
 // ===== AUTH ROUTES =====
 app.post('/api/auth/register', async (req, res) => {
-  const { email, password, displayName } = req.body ?? {};
-  if (!email?.trim() || !password || !displayName?.trim())
-    return res.status(400).json({ error: 'Email, password, and display name are required.' });
+  // IP rate limit: max REG_PER_IP_PER_HOUR new accounts per hour
+  const ip  = req.ip || req.socket?.remoteAddress || 'unknown';
+  const rle = regRateLimit.get(ip) || { count: 0, windowStart: Date.now() };
+  if (Date.now() - rle.windowStart > 3_600_000) { rle.count = 0; rle.windowStart = Date.now(); }
+  if (rle.count >= REG_PER_IP_PER_HOUR)
+    return res.status(429).json({ error: 'Too many accounts created from this location. Try again later.' });
+
+  const { username, displayName, password, inviteCode } = req.body ?? {};
+
+  if (!username?.trim() || !password || !displayName?.trim())
+    return res.status(400).json({ error: 'Username, display name, and password are required.' });
+  if (!/^[a-zA-Z0-9_]{3,20}$/.test(username.trim()))
+    return res.status(400).json({ error: 'Username must be 3–20 characters: letters, numbers, and underscores only.' });
   if (password.length < 6)
     return res.status(400).json({ error: 'Password must be at least 6 characters.' });
-  if (db.prepare('SELECT 1 FROM users WHERE email=?').get(email.trim()))
-    return res.status(409).json({ error: 'An account with that email already exists.' });
+
+  // Invite code gate (only enforced when INVITE_ONLY=true)
+  if (INVITE_ONLY) {
+    if (!inviteCode?.trim())
+      return res.status(400).json({ error: 'An invite code is required to create an account.' });
+    const invite = db.prepare('SELECT * FROM invite_codes WHERE code=?').get(inviteCode.trim().toLowerCase());
+    if (!invite)      return res.status(400).json({ error: 'Invalid invite code.' });
+    if (invite.used_by) return res.status(400).json({ error: 'That invite code has already been used.' });
+  }
+
+  if (db.prepare('SELECT 1 FROM users WHERE username=?').get(username.trim().toLowerCase()))
+    return res.status(409).json({ error: 'Username already taken.' });
 
   const id   = uid();
   const hash = await bcrypt.hash(password, 11);
-  db.prepare('INSERT INTO users VALUES(?,?,?,?,?)').run(id, email.trim(), displayName.trim(), hash, now());
+  // Store username in both the username column and the legacy email column so old JWTs still resolve
+  db.prepare('INSERT INTO users VALUES(?,?,?,?,?)').run(id, username.trim().toLowerCase(), displayName.trim(), hash, now());
+  db.prepare('UPDATE users SET username=? WHERE id=?').run(username.trim().toLowerCase(), id);
 
-  const payload = { id, email: email.trim(), displayName: displayName.trim() };
+  if (INVITE_ONLY && inviteCode?.trim())
+    db.prepare('UPDATE invite_codes SET used_by=?, used_at=? WHERE code=?').run(id, now(), inviteCode.trim().toLowerCase());
+
+  rle.count++; regRateLimit.set(ip, rle);
+
+  const payload = { id, username: username.trim().toLowerCase(), displayName: displayName.trim() };
   res.json({ token: jwt.sign(payload, JWT_SECRET, { expiresIn: '60d' }), user: payload });
 });
 
 app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body ?? {};
-  if (!email || !password)
-    return res.status(400).json({ error: 'Email and password required.' });
-  const user = db.prepare('SELECT * FROM users WHERE email=?').get(email.trim());
+  const { username, password } = req.body ?? {};
+  if (!username || !password)
+    return res.status(400).json({ error: 'Username and password required.' });
+  const user = db.prepare('SELECT * FROM users WHERE username=?').get(username.trim().toLowerCase());
   if (!user || !(await bcrypt.compare(password, user.password_hash)))
-    return res.status(400).json({ error: 'Invalid email or password.' });
+    return res.status(400).json({ error: 'Invalid username or password.' });
 
-  const payload = { id: user.id, email: user.email, displayName: user.display_name };
+  const payload = { id: user.id, username: user.username, displayName: user.display_name };
   res.json({ token: jwt.sign(payload, JWT_SECRET, { expiresIn: '60d' }), user: payload });
 });
 
 app.get('/api/auth/me', auth, (req, res) => {
-  const u = db.prepare('SELECT id, email, display_name as displayName FROM users WHERE id=?').get(req.user.id);
+  const u = db.prepare('SELECT id, username, display_name as displayName FROM users WHERE id=?').get(req.user.id);
   u ? res.json(u) : res.status(404).json({ error: 'User not found' });
 });
 
@@ -321,7 +401,6 @@ app.delete('/api/pools/:id/suggestions/:sid', auth, (req, res) => {
 });
 
 // ===== SAVED COMBOS =====
-const saveRateLimit = new Map(); // userId → last-save timestamp
 
 app.get('/api/pools/:id/saved-combos', softAuth, (req, res) => {
   const pool = db.prepare('SELECT is_published FROM pools WHERE id=?').get(req.params.id);
