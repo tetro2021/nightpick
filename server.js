@@ -7,6 +7,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { estimateActivityMinutes, suggestItem } = require('./llm');
 
 const app = express();
 const db = new Database(path.join(__dirname, 'nightpick.db'));
@@ -27,6 +28,10 @@ const SAVED_COMBO_MAX_BYTES = 500_000; // 500 KB — above any reachable UI maxi
 const INVITE_ONLY         = process.env.INVITE_ONLY   === 'true';
 const ADMIN_SECRET        = process.env.ADMIN_SECRET  || null;
 const REG_PER_IP_PER_HOUR = 5;
+const LLM_ENABLED         = process.env.LLM_ENABLED   !== 'false'; // on by default; set 'false' where Ollama isn't available
+const ESTIMATE_MAX        = 60;     // max activities estimated per LLM call
+const ESTIMATE_COOLDOWN_MS  = 15_000;
+const SUGGEST_ITEM_COOLDOWN_MS = 10_000;
 
 app.use(express.json({ limit: '500kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -100,10 +105,14 @@ try { db.exec('ALTER TABLE users ADD COLUMN username TEXT COLLATE NOCASE'); } ca
 // Copy existing emails into username for any pre-migration accounts
 try { db.exec("UPDATE users SET username = email WHERE username IS NULL"); } catch {}
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username)'); } catch {}
+// Extensible per-suggestion attributes (estimatedMinutes, future: location, …) stored as JSON
+try { db.exec("ALTER TABLE suggestions ADD COLUMN attributes TEXT NOT NULL DEFAULT '{}'"); } catch {}
 
 // In-memory rate limit maps (reset on server restart — acceptable for a small app)
-const regRateLimit  = new Map(); // IP     → { count, windowStart }
-const saveRateLimit = new Map(); // userId → last-save timestamp
+const regRateLimit        = new Map(); // IP     → { count, windowStart }
+const saveRateLimit       = new Map(); // userId → last-save timestamp
+const estimateRateLimit   = new Map(); // poolId → last-estimate timestamp
+const suggestItemRateLimit = new Map(); // userId → last-suggest timestamp
 
 // ===== HELPERS =====
 const uid  = () => crypto.randomUUID();
@@ -117,6 +126,25 @@ const getMembership = (poolId, userId) =>
 function normalizeSuggestion(text) {
   return text.toLowerCase().trim()
     .replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// Suggestions carry an extensible JSON `attributes` blob. Parse it on the way out
+// so the API always returns an object, and whitelist/clamp it on the way in.
+const parseAttrs = (raw) => { try { return JSON.parse(raw || '{}'); } catch { return {}; } };
+const serializeSuggestion = (r) => ({ ...r, attributes: parseAttrs(r.attributes) });
+
+function sanitizeAttributes(input = {}) {
+  const out = {};
+  if (input && input.estimatedMinutes != null) {
+    const m = Math.round(Number(input.estimatedMinutes));
+    if (Number.isFinite(m) && m >= 1 && m <= 1440) out.estimatedMinutes = m;
+  }
+  if (input && typeof input.location === 'string' && input.location.trim())
+    out.location = input.location.trim().slice(0, 200);
+  // Modifier → suggestion-type association (category id slug; validated against real categories client-side)
+  if (input && typeof input.appliesTo === 'string' && /^[a-z0-9_]{1,30}$/.test(input.appliesTo))
+    out.appliesTo = input.appliesTo;
+  return out;
 }
 
 const getCounts = (poolId) => {
@@ -154,7 +182,7 @@ function adminAuth(req, res, next) {
 
 // ===== CONFIG =====
 app.get('/api/config', (req, res) => {
-  res.json({ inviteOnly: INVITE_ONLY });
+  res.json({ inviteOnly: INVITE_ONLY, llmEnabled: LLM_ENABLED });
 });
 
 // ===== ADMIN =====
@@ -369,13 +397,13 @@ app.get('/api/pools/:id/suggestions', softAuth, (req, res) => {
   if (!pool) return res.status(404).json({ error: 'Pool not found.' });
   const mem = req.user ? getMembership(req.params.id, req.user.id) : null;
   if (!mem && !pool.is_published) return res.status(403).json({ error: 'Not a member.' });
-  res.json(db.prepare('SELECT * FROM suggestions WHERE pool_id=? ORDER BY created_at ASC').all(req.params.id));
+  res.json(db.prepare('SELECT * FROM suggestions WHERE pool_id=? ORDER BY created_at ASC').all(req.params.id).map(serializeSuggestion));
 });
 
 app.post('/api/pools/:id/suggestions', auth, (req, res) => {
   const mem = getMembership(req.params.id, req.user.id);
   if (!mem) return res.status(403).json({ error: 'Not a member.' });
-  const { categoryId, text } = req.body ?? {};
+  const { categoryId, text, attributes } = req.body ?? {};
   if (!categoryId || !text?.trim()) return res.status(400).json({ error: 'Category and text required.' });
   const poolInfo = db.prepare('SELECT allow_duplicates FROM pools WHERE id=?').get(req.params.id);
   if (poolInfo && !poolInfo.allow_duplicates) {
@@ -386,9 +414,36 @@ app.post('/api/pools/:id/suggestions', auth, (req, res) => {
   }
   const count = db.prepare('SELECT COUNT(*) as c FROM suggestions WHERE pool_id=? AND category_id=?').get(req.params.id, categoryId).c;
   if (count >= SUGGESTION_LIMIT) return res.status(429).json({ error: `Limit of ${SUGGESTION_LIMIT} suggestions per category reached.` });
-  const s = { id: uid(), pool_id: req.params.id, category_id: categoryId, text: text.trim().slice(0, 200), added_by: req.user.id, added_by_name: req.user.displayName, created_at: now() };
-  db.prepare('INSERT INTO suggestions VALUES(?,?,?,?,?,?,?)').run(s.id, s.pool_id, s.category_id, s.text, s.added_by, s.added_by_name, s.created_at);
-  res.json(s);
+  const attrs = sanitizeAttributes(attributes);
+  const s = { id: uid(), pool_id: req.params.id, category_id: categoryId, text: text.trim().slice(0, 200), added_by: req.user.id, added_by_name: req.user.displayName, created_at: now(), attributes: JSON.stringify(attrs) };
+  db.prepare('INSERT INTO suggestions (id, pool_id, category_id, text, added_by, added_by_name, created_at, attributes) VALUES(?,?,?,?,?,?,?,?)')
+    .run(s.id, s.pool_id, s.category_id, s.text, s.added_by, s.added_by_name, s.created_at, s.attributes);
+  res.json(serializeSuggestion(s));
+});
+
+app.put('/api/pools/:id/suggestions/:sid', auth, (req, res) => {
+  const s = db.prepare('SELECT * FROM suggestions WHERE id=? AND pool_id=?').get(req.params.sid, req.params.id);
+  if (!s) return res.status(404).json({ error: 'Suggestion not found.' });
+  const mem = getMembership(req.params.id, req.user.id);
+  if (!mem) return res.status(403).json({ error: 'Not a member.' });
+  if (mem.role !== 'owner' && s.added_by !== req.user.id) return res.status(403).json({ error: 'You can only edit your own suggestions.' });
+
+  const { text, attributes } = req.body ?? {};
+  if (!text?.trim()) return res.status(400).json({ error: 'Text required.' });
+
+  // Re-run the no-duplicates guard against other suggestions in the same category
+  const poolInfo = db.prepare('SELECT allow_duplicates FROM pools WHERE id=?').get(req.params.id);
+  if (poolInfo && !poolInfo.allow_duplicates) {
+    const norm = normalizeSuggestion(text.trim());
+    const existing = db.prepare('SELECT id, text FROM suggestions WHERE pool_id=? AND category_id=? AND id!=?').all(req.params.id, s.category_id, s.id);
+    if (existing.some(o => normalizeSuggestion(o.text) === norm))
+      return res.status(409).json({ error: 'A similar suggestion already exists in this category.' });
+  }
+
+  const attrs = sanitizeAttributes(attributes);
+  db.prepare('UPDATE suggestions SET text=?, attributes=? WHERE id=?')
+    .run(text.trim().slice(0, 200), JSON.stringify(attrs), s.id);
+  res.json(serializeSuggestion({ ...s, text: text.trim().slice(0, 200), attributes: JSON.stringify(attrs) }));
 });
 
 app.delete('/api/pools/:id/suggestions/:sid', auth, (req, res) => {
@@ -399,6 +454,80 @@ app.delete('/api/pools/:id/suggestions/:sid', auth, (req, res) => {
   if (mem.role !== 'owner' && s.added_by !== req.user.id) return res.status(403).json({ error: 'You can only delete your own suggestions.' });
   db.prepare('DELETE FROM suggestions WHERE id=?').run(req.params.sid);
   res.json({ ok: true });
+});
+
+// "Let Nightpick Guess" — owner-only bulk LLM time estimates for activities missing one
+app.post('/api/pools/:id/estimate-times', auth, async (req, res) => {
+  if (!LLM_ENABLED) return res.status(503).json({ error: 'Time estimation is not available on this server.' });
+  const mem = getMembership(req.params.id, req.user.id);
+  if (mem?.role !== 'owner') return res.status(403).json({ error: 'Owner only.' });
+
+  const last = estimateRateLimit.get(req.params.id) || 0;
+  if (Date.now() - last < ESTIMATE_COOLDOWN_MS)
+    return res.status(429).json({ error: 'Please wait a moment before guessing again.' });
+
+  // Activities with no estimate yet
+  const rows = db.prepare("SELECT * FROM suggestions WHERE pool_id=? AND category_id='activity'").all(req.params.id);
+  const pending = rows.map(serializeSuggestion).filter(s => s.attributes.estimatedMinutes == null);
+  if (!pending.length) return res.json({ updated: [] });
+
+  const batch = pending.slice(0, ESTIMATE_MAX);
+  estimateRateLimit.set(req.params.id, Date.now());
+
+  let estimates;
+  try {
+    estimates = await estimateActivityMinutes(batch.map(s => ({ id: s.id, text: s.text })));
+  } catch (err) {
+    console.error('estimate-times:', err.message);
+    return res.status(502).json({ error: "Nightpick's helper isn't reachable right now. Try again shortly." });
+  }
+
+  const updated = [];
+  const upd = db.prepare('UPDATE suggestions SET attributes=? WHERE id=?');
+  for (const s of batch) {
+    const minutes = estimates.get(s.id);
+    if (minutes == null) continue;
+    const attrs = { ...s.attributes, estimatedMinutes: minutes };
+    upd.run(JSON.stringify(attrs), s.id);
+    updated.push(serializeSuggestion({ ...s, attributes: JSON.stringify(attrs) }));
+  }
+
+  res.json({ updated });
+});
+
+// "Let Nightpick Suggest" — any member, per-user cooldown, pre-fills the suggestion input client-side
+const CATEGORY_LABELS = { activity: 'Activity', food: 'Food', drink: 'Drink', modifier: 'Modifier' };
+
+app.post('/api/pools/:id/suggest-item', auth, async (req, res) => {
+  if (!LLM_ENABLED) return res.status(503).json({ error: 'AI suggestions are not available on this server.' });
+  const mem = getMembership(req.params.id, req.user.id);
+  if (!mem) return res.status(403).json({ error: 'Not a member.' });
+
+  const last = suggestItemRateLimit.get(req.user.id) || 0;
+  if (Date.now() - last < SUGGEST_ITEM_COOLDOWN_MS)
+    return res.status(429).json({ error: 'Please wait a moment before generating again.' });
+
+  const { categoryId } = req.body ?? {};
+  if (!categoryId) return res.status(400).json({ error: 'categoryId required.' });
+
+  const pool = db.prepare('SELECT name, description FROM pools WHERE id=?').get(req.params.id);
+  if (!pool) return res.status(404).json({ error: 'Pool not found.' });
+
+  const existing = db.prepare('SELECT text FROM suggestions WHERE pool_id=? AND category_id=?')
+    .all(req.params.id, categoryId).map(r => r.text);
+
+  const categoryLabel = CATEGORY_LABELS[categoryId] || categoryId;
+  suggestItemRateLimit.set(req.user.id, Date.now());
+
+  let text;
+  try {
+    text = await suggestItem(categoryLabel, pool.name, pool.description, existing);
+  } catch (err) {
+    console.error('suggest-item:', err.message);
+    return res.status(502).json({ error: "Nightpick's helper isn't reachable right now. Try again shortly." });
+  }
+
+  res.json({ text });
 });
 
 // ===== SAVED COMBOS =====

@@ -205,6 +205,54 @@ textarea.input{resize:vertical;min-height:72px}
 .delete-btn:hover{color:var(--red);background:var(--red-dim)}
 .copy-btn{width:22px;height:22px;border:none;background:none;color:var(--text-muted);cursor:pointer;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;transition:color var(--t),background var(--t)}
 .copy-btn:hover{color:var(--activity);background:var(--activity-dim)}
+.edit-btn{width:22px;height:22px;border:none;background:none;color:var(--text-muted);cursor:pointer;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;line-height:1;transition:color var(--t),background var(--t)}
+.edit-btn:hover{color:var(--cat-color,var(--activity));background:color-mix(in srgb,var(--cat-color,var(--activity)) 14%,transparent)}
+
+/* Suggestion attributes (time estimate pill) */
+.suggestion-attrs{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+.suggestion-time-pill{display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;color:var(--cat-color);background:color-mix(in srgb,var(--cat-color) 13%,transparent);border:1px solid color-mix(in srgb,var(--cat-color) 26%,transparent)}
+
+/* "Add details" disclosure under the add form */
+.add-details{margin:-6px 0 14px}
+.details-toggle{cursor:pointer;display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:500;color:var(--text-dim);padding:4px 2px;list-style:none;user-select:none;transition:color var(--t)}
+.details-toggle::-webkit-details-marker{display:none}
+.details-toggle:hover{color:var(--text)}
+.details-panel{margin-top:10px;padding:14px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);display:flex;flex-direction:column;gap:14px}
+.attr-field{display:flex;flex-direction:column;gap:7px}
+.attr-label{font-size:12px;font-weight:600;color:var(--text-dim)}
+.time-picker{display:flex;align-items:center;gap:7px}
+.time-input{width:62px;padding:7px 9px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13.5px;text-align:center}
+.time-input:focus{outline:none;border-color:var(--cat-color,var(--activity))}
+.time-unit{font-size:12.5px;color:var(--text-muted);margin-right:4px}
+.attr-select{padding:8px 10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13.5px;cursor:pointer;min-width:160px}
+.attr-select:focus{outline:none;border-color:var(--cat-color,var(--activity))}
+
+/* Modifier → suggestion-type association pill on a suggestion card */
+.modifier-applies-pill{display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;color:var(--cat-color);background:color-mix(in srgb,var(--cat-color) 13%,transparent);border:1px solid color-mix(in srgb,var(--cat-color) 26%,transparent)}
+
+/* Generate-tab Advanced disclosure */
+.gen-advanced{margin:-14px 0 28px}
+.gen-advanced .details-panel{flex-direction:row;flex-wrap:wrap;align-items:flex-start;gap:24px}
+.gen-advanced .gen-ctrl{gap:8px}
+
+/* Download / export button */
+.btn-dl{padding:5px 11px;border-radius:var(--radius-sm);border:1px solid var(--border);background:transparent;color:var(--text-muted);font-size:12px;font-weight:500;cursor:pointer;transition:color var(--t),border-color var(--t),background var(--t);white-space:nowrap;flex-shrink:0}
+.btn-dl:hover{color:var(--text);border-color:var(--text-dim);background:var(--surface-2)}
+
+/* Time-limit controls in Advanced panel */
+.time-limit-row{display:flex;flex-direction:column;gap:8px;flex-basis:100%}
+.time-limit-inputs{display:flex;gap:20px;flex-wrap:wrap;align-items:center}
+.time-bound{display:flex;align-items:center;gap:8px}
+.time-bound-label{font-size:12px;font-weight:600;color:var(--text-dim);min-width:26px;text-transform:uppercase;letter-spacing:.04em}
+
+/* Time-limit results banner */
+.time-limit-summary{display:flex;align-items:center;gap:8px;padding:10px 16px;margin-bottom:12px;background:color-mix(in srgb,#a598ff 8%,transparent);border:1px solid color-mix(in srgb,#a598ff 20%,transparent);border-radius:var(--radius-sm);font-size:13px;color:var(--text-dim)}
+
+/* Suggest toolbar — row of LLM action buttons */
+.suggest-toolbar-row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+.btn-guess{padding:8px 16px;border-radius:var(--radius-sm);border:1px solid color-mix(in srgb,var(--cat-color) 40%,transparent);background:color-mix(in srgb,var(--cat-color) 12%,transparent);color:var(--cat-color);font-size:13px;font-weight:600;cursor:pointer;transition:background var(--t),transform var(--t),opacity var(--t)}
+.btn-guess:hover:not(:disabled){background:color-mix(in srgb,var(--cat-color) 20%,transparent);transform:translateY(-1px)}
+.btn-guess:disabled{opacity:.6;cursor:default}
 
 .empty-state{text-align:center;padding:52px 24px;color:var(--text-muted)}
 .empty-icon{font-size:40px;margin-bottom:12px;opacity:.4}
@@ -267,7 +315,9 @@ textarea.input{resize:vertical;min-height:72px}
 .combo-grid{display:flex;flex-direction:column;gap:9px}
 .combo-row{display:grid;gap:10px;animation:rowIn .3s var(--ease) both}
 @keyframes rowIn{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:translateX(0)}}
-.combo-row-number{display:flex;align-items:center;justify-content:center;width:30px;height:30px;background:var(--surface-2);border:1px solid var(--border);border-radius:50%;font-size:11px;font-weight:700;color:var(--text-muted);flex-shrink:0;align-self:center;user-select:none}
+.combo-row-number{display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:30px;padding:4px 2px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:11px;font-weight:700;color:var(--text-muted);flex-shrink:0;align-self:center;user-select:none;gap:2px}
+.row-time{font-size:8.5px;font-weight:500;color:var(--text-muted);opacity:.75;text-align:center;white-space:nowrap}
+.combo-item-time{font-size:11px;font-weight:600;color:var(--cat-color);opacity:.75;margin-top:2px}
 .combo-cell{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--cat-color);border-radius:var(--radius-sm);padding:13px 15px;transition:border-color var(--t),background var(--t),transform var(--t),box-shadow var(--t);position:relative;overflow:hidden}
 .combo-cell::after{content:'';position:absolute;inset:0;background:var(--cat-color-dim,rgba(139,127,245,.08));opacity:0;transition:opacity var(--t);pointer-events:none}
 .combo-cell:hover{border-color:color-mix(in srgb,var(--cat-color) 50%,transparent);background:var(--surface-2);transform:translateY(-2px);box-shadow:0 4px 18px var(--cat-color-glow,rgba(139,127,245,.2))}
