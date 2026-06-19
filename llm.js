@@ -39,10 +39,10 @@ async function generate(prompt, { format } = {}) {
  * @param {{id:string, text:string}[]} activities
  * @returns {Promise<Map<string, number>>} id → minutes (only ids the model returned valid numbers for)
  */
-async function estimateActivityMinutes(activities) {
-  if (!activities.length) return new Map();
+const ESTIMATE_BATCH_SIZE = 15;
 
-  const list = activities.map(a => `- id "${a.id}": ${a.text}`).join('\n');
+async function estimateBatch(batch) {
+  const list = batch.map(a => `- id "${a.id}": ${a.text}`).join('\n');
   const prompt =
 `You estimate how long everyday activities typically take.
 For each activity below, give a single realistic typical duration in MINUTES (integer, 1-1440).
@@ -61,11 +61,23 @@ ${list}`;
 
   const out = new Map();
   const rows = Array.isArray(parsed?.estimates) ? parsed.estimates : [];
-  const valid = new Set(activities.map(a => a.id));
+  const valid = new Set(batch.map(a => a.id));
   for (const row of rows) {
     if (!row || !valid.has(row.id)) continue;
     const m = clampMinutes(row.minutes);
     if (m != null) out.set(row.id, m);
+  }
+  return out;
+}
+
+async function estimateActivityMinutes(activities) {
+  if (!activities.length) return new Map();
+
+  const out = new Map();
+  for (let i = 0; i < activities.length; i += ESTIMATE_BATCH_SIZE) {
+    const batch = activities.slice(i, i + ESTIMATE_BATCH_SIZE);
+    const batchResult = await estimateBatch(batch);
+    batchResult.forEach((v, k) => out.set(k, v));
   }
   return out;
 }
