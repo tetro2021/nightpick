@@ -235,6 +235,10 @@ textarea.input{resize:vertical;min-height:72px}
 .gen-advanced .details-panel{flex-direction:row;flex-wrap:wrap;align-items:flex-start;gap:24px}
 .gen-advanced .gen-ctrl{gap:8px}
 
+/* Download / export button */
+.btn-dl{padding:5px 11px;border-radius:var(--radius-sm);border:1px solid var(--border);background:transparent;color:var(--text-muted);font-size:12px;font-weight:500;cursor:pointer;transition:color var(--t),border-color var(--t),background var(--t);white-space:nowrap;flex-shrink:0}
+.btn-dl:hover{color:var(--text);border-color:var(--text-dim);background:var(--surface-2)}
+
 /* Time-limit controls in Advanced panel */
 .time-limit-row{display:flex;flex-direction:column;gap:8px;flex-basis:100%}
 .time-limit-inputs{display:flex;gap:20px;flex-wrap:wrap;align-items:center}

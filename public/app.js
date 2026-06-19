@@ -630,6 +630,59 @@ function readAttributeFields(catId, idPrefix = 'attr') {
   return attrs;
 }
 
+// ===== DOWNLOADS =====
+function downloadCSV(rows, filename) {
+  const cell = v => {
+    const s = String(v ?? '');
+    return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const csv = '﻿' + rows.map(r => r.map(cell).join(',')).join('\r\n'); // BOM for Excel
+  const a = Object.assign(document.createElement('a'), {
+    href: URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' })),
+    download: filename,
+  });
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+
+function downloadSuggestions() {
+  const { pool, suggestions } = poolState;
+  const rows = [['Category', 'Text', 'Added By', 'Estimated Time', 'Applies To']];
+  CATEGORIES.forEach(cat => {
+    suggestions.filter(s => s.category_id === cat.id).forEach(s => {
+      const time    = s.attributes?.estimatedMinutes ? fmtDuration(s.attributes.estimatedMinutes) : '';
+      const applies = cat.isModifier ? (catById(s.attributes?.appliesTo) || CATEGORIES.find(c => !c.isModifier))?.label || '' : '';
+      rows.push([cat.label, s.text, s.added_by_name, time, applies]);
+    });
+  });
+  downloadCSV(rows, `${pool.name} - Suggestions.csv`);
+}
+
+function downloadCombos() {
+  if (!lastGeneratedData) return;
+  const { pool } = poolState;
+  const { combos } = lastGeneratedData;
+  const colCats = CATEGORIES.filter(c => !c.isModifier);
+  const hasTime = combos.some(r => r._timeMins != null);
+  const headers = ['#', ...colCats.map(c => c.label), ...(hasTime ? ['Total Time'] : [])];
+  const rows = [headers];
+  combos.forEach((row, i) => {
+    const cells = [String(i + 1)];
+    colCats.forEach(cat => {
+      const items = (row[cat.id] || []).map((item, idx) => {
+        const mod = row._mods?.[cat.id]?.[idx];
+        return mod ? `${item.text} [${mod.text}]` : item.text;
+      });
+      cells.push(items.join(' / '));
+    });
+    if (hasTime) cells.push(row._timeMins != null ? fmtDuration(row._timeMins) : '');
+    rows.push(cells);
+  });
+  downloadCSV(rows, `${pool.name} - Combinations.csv`);
+}
+
 // ===== SUGGEST TAB =====
 function renderSuggestTab() {
   const { pool, suggestions } = poolState;
@@ -805,6 +858,7 @@ function renderSuggestions() {
   area.innerHTML = `
     <div class="suggestions-header">
       <div class="suggestions-title" style="${catVars(cat)}"><span class="dot"></span>${catSuggestions.length} ${cat.label} suggestion${catSuggestions.length!==1?'s':''}</div>
+      <button class="btn-dl" id="export-suggestions-btn" title="Download all suggestions as CSV">⬇ Export all</button>
     </div>
     <div class="suggestions-grid">
       ${catSuggestions.map(s => {
@@ -829,6 +883,8 @@ function renderSuggestions() {
       }).join('')}
     </div>
   `;
+
+  document.getElementById('export-suggestions-btn')?.addEventListener('click', downloadSuggestions);
 
   area.querySelectorAll('.delete-btn').forEach(btn => {
     btn.addEventListener('click', async (e) => {
@@ -914,6 +970,7 @@ function renderGenerateTab() {
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M1 4h10M1 4l3-3M1 4l3 3M15 12H5M15 12l-3-3M15 12l-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         Reshuffle
       </button>
+      <button class="btn-dl" id="export-combos-btn" style="display:none" title="Download combinations as CSV">⬇ Export</button>
       ${poolState.pool?.my_role === 'owner' ? `<button class="btn-save-combo" id="save-combo-btn" style="display:none">💾 Save</button>` : ''}
     </div>
     <details class="gen-advanced" ${lgs.advancedOpen?'open':''}>
@@ -1071,6 +1128,7 @@ function renderGenerateTab() {
 
   document.getElementById('generate-btn').addEventListener('click', doGenerate);
   document.getElementById('reshuffle-btn').addEventListener('click', doGenerate);
+  document.getElementById('export-combos-btn')?.addEventListener('click', downloadCombos);
 
   document.getElementById('save-combo-btn')?.addEventListener('click', () => {
     if (!lastGeneratedData) return;
@@ -1257,9 +1315,10 @@ function runGenerate(count, withReplacement, includeModifiers=false, modifierCha
 
   resultsArea.innerHTML = comboGridHTML(combos, { withReplacement, cc, truncated, actualCount });
   reshuffleBtn.style.display = 'flex';
-  // Store for Save feature; expose Save button if present
+  // Store for Save/Export; expose action buttons
   lastGeneratedData = { settings: { count, withReplacement, includeModifiers, modifierChance, catCounts: cc }, combos };
   document.getElementById('save-combo-btn')?.style.setProperty('display', 'flex');
+  document.getElementById('export-combos-btn')?.style.setProperty('display', 'flex');
 }
 
 // Time-limit generate: each of `count` combo rows independently fills activities within [minMins, maxMins].
@@ -1377,6 +1436,7 @@ function runGenerateByTime(count, minMins, maxMins, withReplacement, includeModi
 
   lastGeneratedData = { settings: { timeLimitMode: true, count, minMins, maxMins, withReplacement, includeModifiers, modifierChance, catCounts: cc }, combos };
   document.getElementById('save-combo-btn')?.style.setProperty('display', 'flex');
+  document.getElementById('export-combos-btn')?.style.setProperty('display', 'flex');
 }
 
 // ===== MEMBERS TAB =====
