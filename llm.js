@@ -70,4 +70,41 @@ ${list}`;
   return out;
 }
 
-module.exports = { estimateActivityMinutes, OLLAMA_URL, OLLAMA_MODEL };
+/**
+ * Generate a single new suggestion for a pool category.
+ * @param {string} categoryLabel  e.g. "Activity", "Food", "Drink", "Modifier"
+ * @param {string} poolName
+ * @param {string} poolDescription
+ * @param {string[]} existingItems  existing suggestion texts for that category
+ * @returns {Promise<string>}  the suggested text (≤200 chars)
+ */
+async function suggestItem(categoryLabel, poolName, poolDescription, existingItems) {
+  const existingBlock = existingItems.length > 0
+    ? `Existing ${categoryLabel.toLowerCase()} suggestions:\n${existingItems.map(t => `- ${t}`).join('\n')}`
+    : `No ${categoryLabel.toLowerCase()} suggestions have been added yet.`;
+
+  const poolCtx = poolDescription?.trim()
+    ? `Pool: "${poolName}" — ${poolDescription.trim()}`
+    : `Pool: "${poolName}"`;
+
+  const prompt =
+`You help users brainstorm ideas for a social activity planning app called NightPick.
+${poolCtx}
+
+${existingBlock}
+
+Generate ONE new ${categoryLabel.toLowerCase()} idea that fits the pool's theme and is distinct from the existing suggestions.
+Respond ONLY with strict JSON of the form: {"suggestion":"<text>"}
+Keep the suggestion concise (under 80 characters), fun, and specific. No explanations.`;
+
+  const raw = await generate(prompt, { format: 'json' });
+
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { throw new Error('LLM returned malformed output'); }
+
+  const text = (parsed?.suggestion ?? '').trim().slice(0, 200);
+  if (!text) throw new Error('LLM did not return a suggestion');
+  return text;
+}
+
+module.exports = { estimateActivityMinutes, suggestItem, OLLAMA_URL, OLLAMA_MODEL };

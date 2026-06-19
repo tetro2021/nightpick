@@ -7,7 +7,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { estimateActivityMinutes } = require('./llm');
+const { estimateActivityMinutes, suggestItem } = require('./llm');
 
 const app = express();
 const db = new Database(path.join(__dirname, 'nightpick.db'));
@@ -30,7 +30,8 @@ const ADMIN_SECRET        = process.env.ADMIN_SECRET  || null;
 const REG_PER_IP_PER_HOUR = 5;
 const LLM_ENABLED         = process.env.LLM_ENABLED   !== 'false'; // on by default; set 'false' where Ollama isn't available
 const ESTIMATE_MAX        = 60;     // max activities estimated per LLM call
-const ESTIMATE_COOLDOWN_MS = 15_000;
+const ESTIMATE_COOLDOWN_MS  = 15_000;
+const SUGGEST_ITEM_COOLDOWN_MS = 10_000;
 
 app.use(express.json({ limit: '500kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -108,9 +109,10 @@ try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(use
 try { db.exec("ALTER TABLE suggestions ADD COLUMN attributes TEXT NOT NULL DEFAULT '{}'"); } catch {}
 
 // In-memory rate limit maps (reset on server restart — acceptable for a small app)
-const regRateLimit      = new Map(); // IP     → { count, windowStart }
-const saveRateLimit     = new Map(); // userId → last-save timestamp
-const estimateRateLimit = new Map(); // poolId → last-estimate timestamp
+const regRateLimit        = new Map(); // IP     → { count, windowStart }
+const saveRateLimit       = new Map(); // userId → last-save timestamp
+const estimateRateLimit   = new Map(); // poolId → last-estimate timestamp
+const suggestItemRateLimit = new Map(); // userId → last-suggest timestamp
 
 // ===== HELPERS =====
 const uid  = () => crypto.randomUUID();
@@ -139,6 +141,9 @@ function sanitizeAttributes(input = {}) {
   }
   if (input && typeof input.location === 'string' && input.location.trim())
     out.location = input.location.trim().slice(0, 200);
+  // Modifier → suggestion-type association (category id slug; validated against real categories client-side)
+  if (input && typeof input.appliesTo === 'string' && /^[a-z0-9_]{1,30}$/.test(input.appliesTo))
+    out.appliesTo = input.appliesTo;
   return out;
 }
 
@@ -488,6 +493,41 @@ app.post('/api/pools/:id/estimate-times', auth, async (req, res) => {
   }
 
   res.json({ updated });
+});
+
+// "Let Nightpick Suggest" — any member, per-user cooldown, pre-fills the suggestion input client-side
+const CATEGORY_LABELS = { activity: 'Activity', food: 'Food', drink: 'Drink', modifier: 'Modifier' };
+
+app.post('/api/pools/:id/suggest-item', auth, async (req, res) => {
+  if (!LLM_ENABLED) return res.status(503).json({ error: 'AI suggestions are not available on this server.' });
+  const mem = getMembership(req.params.id, req.user.id);
+  if (!mem) return res.status(403).json({ error: 'Not a member.' });
+
+  const last = suggestItemRateLimit.get(req.user.id) || 0;
+  if (Date.now() - last < SUGGEST_ITEM_COOLDOWN_MS)
+    return res.status(429).json({ error: 'Please wait a moment before generating again.' });
+
+  const { categoryId } = req.body ?? {};
+  if (!categoryId) return res.status(400).json({ error: 'categoryId required.' });
+
+  const pool = db.prepare('SELECT name, description FROM pools WHERE id=?').get(req.params.id);
+  if (!pool) return res.status(404).json({ error: 'Pool not found.' });
+
+  const existing = db.prepare('SELECT text FROM suggestions WHERE pool_id=? AND category_id=?')
+    .all(req.params.id, categoryId).map(r => r.text);
+
+  const categoryLabel = CATEGORY_LABELS[categoryId] || categoryId;
+  suggestItemRateLimit.set(req.user.id, Date.now());
+
+  let text;
+  try {
+    text = await suggestItem(categoryLabel, pool.name, pool.description, existing);
+  } catch (err) {
+    console.error('suggest-item:', err.message);
+    return res.status(502).json({ error: "Nightpick's helper isn't reachable right now. Try again shortly." });
+  }
+
+  res.json({ text });
 });
 
 // ===== SAVED COMBOS =====

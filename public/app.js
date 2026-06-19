@@ -6,8 +6,9 @@ const CATEGORIES = [
   { id:'activity', label:'Activity',          icon:'⚡', color:'#a598ff', colorDim:'rgba(165,152,255,0.11)', colorGlow:'rgba(165,152,255,0.25)' },
   { id:'food',     label:'Food',              icon:'🍽️', color:'#f09348', colorDim:'rgba(240,147,72,0.11)',  colorGlow:'rgba(240,147,72,0.25)'  },
   { id:'drink',    label:'Drink',             icon:'🥤', color:'#3dd6a3', colorDim:'rgba(61,214,163,0.11)',  colorGlow:'rgba(61,214,163,0.25)'  },
-  // isModifier=true → appears as a Suggest tab but is handled separately in Generate
-  { id:'modifier', label:'Activity Modifier', icon:'🎲', color:'#f472b6', colorDim:'rgba(244,114,182,0.11)', colorGlow:'rgba(244,114,182,0.25)', isModifier:true },
+  // isModifier=true → appears as a Suggest tab but is handled separately in Generate.
+  // Each modifier carries an `appliesTo` attribute naming the suggestion type it decorates.
+  { id:'modifier', label:'Modifiers', icon:'🎲', color:'#f472b6', colorDim:'rgba(244,114,182,0.11)', colorGlow:'rgba(244,114,182,0.25)', isModifier:true },
 ];
 
 // ===== API CLIENT =====
@@ -570,7 +571,7 @@ async function renderPoolTab(tab) {
 // ===== OPTIONAL ATTRIBUTE FIELDS =====
 // Data-driven: returns the optional attribute inputs that apply to a category.
 // To add a new attribute later (e.g. location for all categories), extend these three.
-function hasAttributeFields(catId) { return catId === 'activity'; }
+function hasAttributeFields(catId) { return catId === 'activity' || catId === 'modifier'; }
 
 function attributeFieldsHTML(catId, attrs = {}, idPrefix = 'attr') {
   let html = '';
@@ -588,7 +589,30 @@ function attributeFieldsHTML(catId, attrs = {}, idPrefix = 'attr') {
         </div>
       </div>`;
   }
+  if (catId === 'modifier') {
+    const targets = CATEGORIES.filter(c => !c.isModifier);
+    const selected = attrs.appliesTo || targets[0]?.id;
+    html += `
+      <div class="attr-field">
+        <label class="attr-label">Applies to</label>
+        <select id="${idPrefix}-appliesTo" class="attr-select">
+          ${targets.map(c => `<option value="${c.id}" ${c.id===selected?'selected':''}>${c.icon} ${esc(c.label)}</option>`).join('')}
+        </select>
+      </div>`;
+  }
   return html;
+}
+
+// Read-only attribute pills shown on a suggestion card
+function suggestionAttrPillsHTML(s) {
+  const pills = [];
+  const mins = s.attributes?.estimatedMinutes;
+  if (mins) pills.push(`<span class="suggestion-time-pill">⏱ ${esc(fmtDuration(mins))}</span>`);
+  if (s.category_id === 'modifier') {
+    const target = catById(s.attributes?.appliesTo) || CATEGORIES.find(c => !c.isModifier);
+    if (target) pills.push(`<span class="modifier-applies-pill">→ ${target.icon} ${esc(target.label)}</span>`);
+  }
+  return pills.length ? `<div class="suggestion-attrs">${pills.join('')}</div>` : '';
 }
 
 function readAttributeFields(catId, idPrefix = 'attr') {
@@ -598,6 +622,10 @@ function readAttributeFields(catId, idPrefix = 'attr') {
     const m = parseInt(document.getElementById(`${idPrefix}-mins`)?.value) || 0;
     const total = Math.min(h * 60 + m, 1440);
     if (total > 0) attrs.estimatedMinutes = total;
+  }
+  if (catId === 'modifier') {
+    const sel = document.getElementById(`${idPrefix}-appliesTo`)?.value;
+    if (sel) attrs.appliesTo = sel;
   }
   return attrs;
 }
@@ -667,15 +695,45 @@ function renderAddDetails() {
     </details>`;
 }
 
-// "Let Nightpick Guess" lives here — owner-only, activity-only, LLM-enabled
+// Suggest toolbar: "Let Nightpick Suggest" (member-only) + "Guess times" (owner + activity only)
 function renderSuggestToolbar() {
   const bar = document.getElementById('suggest-toolbar');
   if (!bar) return;
-  const isOwner = poolState.pool.my_role === 'owner';
-  const show = isOwner && poolState.activeCategory === 'activity' && Auth.config.llmEnabled;
-  if (!show) { bar.innerHTML = ''; return; }
-  bar.innerHTML = `<button class="btn-guess" id="guess-btn" style="${catVars(catById('activity'))}">✨ Let Nightpick Guess times</button>`;
-  document.getElementById('guess-btn').addEventListener('click', runGuessTimes);
+  const isMember = !!poolState.pool.my_role;
+  const isOwner  = poolState.pool.my_role === 'owner';
+  const cat      = catById(poolState.activeCategory);
+  const showSuggest = isMember && Auth.config.llmEnabled;
+  const showGuess   = isOwner && poolState.activeCategory === 'activity' && Auth.config.llmEnabled;
+
+  if (!showSuggest && !showGuess) { bar.innerHTML = ''; return; }
+
+  const buttons = [];
+  if (showSuggest) buttons.push(`<button class="btn-guess" id="suggest-ai-btn" style="${catVars(cat)}">✨ Let Nightpick Suggest</button>`);
+  if (showGuess)   buttons.push(`<button class="btn-guess" id="guess-btn" style="${catVars(catById('activity'))}">⏱ Guess times</button>`);
+  bar.innerHTML = `<div class="suggest-toolbar-row">${buttons.join('')}</div>`;
+
+  if (showSuggest) document.getElementById('suggest-ai-btn').addEventListener('click', runSuggestItem);
+  if (showGuess)   document.getElementById('guess-btn').addEventListener('click', runGuessTimes);
+}
+
+async function runSuggestItem() {
+  const btn   = document.getElementById('suggest-ai-btn');
+  const input = document.getElementById('suggestion-input');
+  if (!btn || !input) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '✨ Thinking…';
+  try {
+    const { text } = await API.post(`/pools/${poolState.pool.id}/suggest-item`, { categoryId: poolState.activeCategory });
+    input.value = text;
+    input.focus();
+    toast('Suggestion ready — review and click Add!', 'info');
+  } catch(err) {
+    toast(err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
 }
 
 async function runGuessTimes() {
@@ -751,12 +809,11 @@ function renderSuggestions() {
     <div class="suggestions-grid">
       ${catSuggestions.map(s => {
         const canEdit = isOwner || s.added_by === currentUser?.id;
-        const mins = s.attributes?.estimatedMinutes;
         return `
           <div class="suggestion-card" style="${catVars(cat)}" data-id="${s.id}">
             <div class="suggestion-content">
               <div class="suggestion-text">${esc(s.text)}</div>
-              ${mins ? `<div class="suggestion-attrs"><span class="suggestion-time-pill">⏱ ${esc(fmtDuration(mins))}</span></div>` : ''}
+              ${suggestionAttrPillsHTML(s)}
               <div class="suggestion-meta">
                 <span class="suggestion-user">${esc(s.added_by_name)}</span>
                 <span class="suggestion-dot"></span>
@@ -840,57 +897,15 @@ function renderGenerateTab() {
   const hasModifiers = CATEGORIES.some(c => c.isModifier);
   const colCats = CATEGORIES.filter(c => !c.isModifier);
   const lgs = lastGenSettings || {};
+  const tlMinH = Math.floor((lgs.minMins||60) / 60), tlMinM = (lgs.minMins||60) % 60;
+  const tlMaxH = Math.floor((lgs.maxMins||180) / 60), tlMaxM = (lgs.maxMins||180) % 60;
   const content = document.getElementById('pool-tab-content');
   content.innerHTML = `
     <div class="generate-controls">
-      <div class="gen-ctrl">
+      <div class="gen-ctrl" id="combo-count-ctrl">
         <span class="control-label">Combinations</span>
         <input type="number" class="count-input" id="combo-count" value="${lgs.count||5}" min="1" max="50"/>
       </div>
-      <div class="control-divider"></div>
-      <div class="gen-ctrl">
-        <span class="control-label">Allow repeats</span>
-        <div class="toggle-wrapper">
-          <label class="toggle">
-            <input type="checkbox" id="replacement-toggle" ${lgs.withReplacement!==false?'checked':''}>
-            <span class="toggle-track"><span class="toggle-thumb"></span></span>
-          </label>
-          <span class="toggle-label" id="toggle-label">${lgs.withReplacement!==false?'Yes — same item can repeat':'No — each item used once'}</span>
-        </div>
-      </div>
-      <div class="control-divider"></div>
-      <div class="gen-ctrl">
-        <span class="control-label">Per combination</span>
-        <div class="cat-counts-row">
-          ${colCats.map(cat=>`
-            <div class="cat-count-item" style="${catVars(cat)}">
-              <span class="cat-count-icon">${cat.icon}</span>
-              <input type="number" class="cat-count-input" id="cat-count-${cat.id}"
-                     value="${lgs.catCounts?.[cat.id]||1}" min="1" max="10"/>
-            </div>
-          `).join('')}
-        </div>
-      </div>
-      ${hasModifiers ? `
-      <div class="control-divider"></div>
-      <div class="gen-ctrl">
-        <span class="control-label">Activity modifiers</span>
-        <div class="toggle-wrapper">
-          <label class="toggle">
-            <input type="checkbox" id="modifier-toggle" ${lgs.includeModifiers?'checked':''}>
-            <span class="toggle-track"><span class="toggle-thumb"></span></span>
-          </label>
-          <span class="toggle-label" id="modifier-label">${lgs.includeModifiers?'Included':'Excluded'}</span>
-        </div>
-      </div>
-      <div class="chance-row" id="chance-row" style="${lgs.includeModifiers?'':'display:none'}">
-        <span class="control-label">Modifier chance</span>
-        <div style="display:flex;align-items:center;gap:10px">
-          <input type="range" class="chance-slider" id="chance-slider" min="0" max="100" value="${lgs.modifierChance??50}"/>
-          <span class="chance-display" id="chance-display">${lgs.modifierChance??50}%</span>
-        </div>
-      </div>
-      ` : ''}
       <button class="btn-generate" id="generate-btn">
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/><path d="M8 5v3l2 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
         Generate
@@ -901,6 +916,92 @@ function renderGenerateTab() {
       </button>
       ${poolState.pool?.my_role === 'owner' ? `<button class="btn-save-combo" id="save-combo-btn" style="display:none">💾 Save</button>` : ''}
     </div>
+    <details class="gen-advanced" ${lgs.advancedOpen?'open':''}>
+      <summary class="details-toggle">⚙ Advanced options</summary>
+      <div class="details-panel">
+        <div class="gen-ctrl">
+          <span class="control-label">By time limit</span>
+          <div class="toggle-wrapper">
+            <label class="toggle">
+              <input type="checkbox" id="time-limit-toggle" ${lgs.timeLimitMode?'checked':''}>
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            </label>
+            <span class="toggle-label" id="time-limit-label">${lgs.timeLimitMode?'Active':'Off'}</span>
+          </div>
+        </div>
+        <div class="time-limit-row" id="time-limit-row" style="${lgs.timeLimitMode?'':'display:none'}">
+          <span class="control-label">Time window</span>
+          <div class="time-limit-inputs">
+            <div class="time-bound">
+              <span class="time-bound-label">Min</span>
+              <div class="time-picker">
+                <input type="number" id="time-min-hours" class="time-input" min="0" max="24" placeholder="0" value="${tlMinH||''}"/>
+                <span class="time-unit">hr</span>
+                <input type="number" id="time-min-mins" class="time-input" min="0" max="59" placeholder="0" value="${tlMinM||''}"/>
+                <span class="time-unit">min</span>
+              </div>
+            </div>
+            <div class="time-bound">
+              <span class="time-bound-label">Max</span>
+              <div class="time-picker">
+                <input type="number" id="time-max-hours" class="time-input" min="0" max="24" placeholder="0" value="${tlMaxH||''}"/>
+                <span class="time-unit">hr</span>
+                <input type="number" id="time-max-mins" class="time-input" min="0" max="59" placeholder="0" value="${tlMaxM||''}"/>
+                <span class="time-unit">min</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="gen-ctrl">
+          <span class="control-label">Allow repeats</span>
+          <div class="toggle-wrapper">
+            <label class="toggle">
+              <input type="checkbox" id="replacement-toggle" ${lgs.withReplacement!==false?'checked':''}>
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            </label>
+            <span class="toggle-label" id="toggle-label">${lgs.withReplacement!==false?'Yes — same item can repeat':'No — each item used once'}</span>
+          </div>
+        </div>
+        <div class="gen-ctrl">
+          <span class="control-label">Per combination</span>
+          <div class="cat-counts-row">
+            ${colCats.map(cat=>`
+              <div class="cat-count-item" style="${catVars(cat)}">
+                <span class="cat-count-icon">${cat.icon}</span>
+                <input type="number" class="cat-count-input" id="cat-count-${cat.id}"
+                       value="${lgs.catCounts?.[cat.id]||1}" min="1" max="10"/>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+        ${hasModifiers ? `
+        <div class="gen-ctrl">
+          <span class="control-label">Modifiers</span>
+          <div class="toggle-wrapper">
+            <label class="toggle">
+              <input type="checkbox" id="modifier-toggle" ${lgs.includeModifiers?'checked':''}>
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            </label>
+            <span class="toggle-label" id="modifier-label">${lgs.includeModifiers?'Included':'Excluded'}</span>
+          </div>
+        </div>
+        <div class="chance-row" id="chance-row" style="${lgs.includeModifiers?'':'display:none'}">
+          <span class="control-label">Modifier chance</span>
+          <div style="display:flex;align-items:center;gap:10px">
+            <input type="range" class="chance-slider" id="chance-slider" min="0" max="100" value="${lgs.modifierChance??50}"/>
+            <span class="chance-display" id="chance-display">${lgs.modifierChance??50}%</span>
+          </div>
+        </div>
+        ` : ''}
+        <div class="gen-ctrl">
+          <span class="control-label">Max per user</span>
+          <div style="display:flex;align-items:center;gap:8px">
+            <input type="number" class="cat-count-input" id="max-per-user" min="1" max="100" placeholder="∞" value="${lgs.maxPerUser||''}"/>
+            <span class="toggle-label">per category</span>
+          </div>
+        </div>
+      </div>
+    </details>
     <div id="results-area">
       <div class="generate-placeholder">
         <div class="placeholder-glyph">✦</div>
@@ -914,6 +1015,15 @@ function renderGenerateTab() {
   const toggleLabel = document.getElementById('toggle-label');
   toggle.addEventListener('change', () => {
     toggleLabel.textContent = toggle.checked ? 'Yes — same item can repeat' : 'No — each item used once';
+  });
+
+  const timeLimitToggle = document.getElementById('time-limit-toggle');
+  const timeLimitLabel  = document.getElementById('time-limit-label');
+  const timeLimitRow    = document.getElementById('time-limit-row');
+  timeLimitToggle.addEventListener('change', () => {
+    const on = timeLimitToggle.checked;
+    timeLimitLabel.textContent = on ? 'Active' : 'Off';
+    timeLimitRow.style.display = on ? '' : 'none';
   });
 
   if (hasModifiers) {
@@ -932,16 +1042,31 @@ function renderGenerateTab() {
   }
 
   const doGenerate = () => {
-    const count = Math.max(1, Math.min(50, parseInt(document.getElementById('combo-count').value)||5));
+    const timeLimitMode = document.getElementById('time-limit-toggle')?.checked || false;
     const withReplacement = document.getElementById('replacement-toggle').checked;
     const includeModifiers = hasModifiers && document.getElementById('modifier-toggle').checked;
     const modifierChance = hasModifiers ? parseInt(document.getElementById('chance-slider')?.value ?? 50) : 0;
+    const maxPerUser = parseInt(document.getElementById('max-per-user')?.value) || 0;
     const catCounts = {};
     colCats.forEach(cat => {
       catCounts[cat.id] = Math.max(1, Math.min(10, parseInt(document.getElementById(`cat-count-${cat.id}`)?.value || 1)));
     });
-    lastGenSettings = { count, withReplacement, includeModifiers, modifierChance, catCounts };
-    runGenerate(count, withReplacement, includeModifiers, modifierChance, catCounts);
+    const advancedOpen = document.querySelector('.gen-advanced')?.open || false;
+
+    const count = Math.max(1, Math.min(50, parseInt(document.getElementById('combo-count').value)||5));
+    if (timeLimitMode) {
+      const minMins = (parseInt(document.getElementById('time-min-hours')?.value) || 0) * 60
+                    + (parseInt(document.getElementById('time-min-mins')?.value)  || 0);
+      const maxMins = (parseInt(document.getElementById('time-max-hours')?.value) || 0) * 60
+                    + (parseInt(document.getElementById('time-max-mins')?.value)  || 0);
+      if (maxMins <= 0) { toast('Set a maximum time first.', 'error'); return; }
+      if (minMins > maxMins) { toast('Minimum time must be ≤ maximum time.', 'error'); return; }
+      lastGenSettings = { count, withReplacement, includeModifiers, modifierChance, catCounts, advancedOpen, timeLimitMode, minMins, maxMins, maxPerUser };
+      runGenerateByTime(count, minMins, maxMins, withReplacement, includeModifiers, modifierChance, catCounts, maxPerUser);
+    } else {
+      lastGenSettings = { count, withReplacement, includeModifiers, modifierChance, catCounts, advancedOpen, timeLimitMode: false, maxPerUser };
+      runGenerate(count, withReplacement, includeModifiers, modifierChance, catCounts, null, 'results-area', 'reshuffle-btn', maxPerUser);
+    }
   };
 
   document.getElementById('generate-btn').addEventListener('click', doGenerate);
@@ -982,7 +1107,76 @@ function renderGenerateTab() {
   if (lastGenSettings) doGenerate();
 }
 
-function runGenerate(count, withReplacement, includeModifiers=false, modifierChance=50, catCounts=null, suggOverride=null, resultsId='results-area', reshuffleId='reshuffle-btn') {
+// Shared combo-grid renderer used by live generation and saved-set display.
+// Per-item modifiers come from row._mods[catId][idx]; falls back to the legacy
+// single row._modifier (older saved sets) on the primary activity item.
+function comboGridHTML(combos, { withReplacement = true, cc = {}, truncated = false, actualCount = combos.length } = {}) {
+  const colCats  = CATEGORIES.filter(c => !c.isModifier);
+  const modCat   = CATEGORIES.find(c => c.isModifier);
+  const actCatId = (colCats.find(c => c.id === 'activity') || colCats[0])?.id;
+
+  const resolveMod = (row, catId, idx) => {
+    if (row._mods) return row._mods[catId]?.[idx] || null;
+    if (row._modifier && catId === actCatId && idx === 0) return row._modifier; // legacy saved sets
+    return null;
+  };
+  const modPill = (mod) => mod && modCat
+    ? `<div class="combo-modifier-pill" style="--mod-color:${modCat.color}">${esc(modCat.icon)} ${esc(mod.text)}</div>` : '';
+
+  const hasRowTime = combos.some(r => r._timeMins != null);
+  const colTemplate = `${hasRowTime ? '52px' : '36px'} repeat(${colCats.length},1fr)`;
+  let html = '';
+  if (truncated) html += `<div class="warning-banner">⚠ Only ${actualCount} combination${actualCount!==1?'s':''} generated — not enough unique suggestions without repeats.</div>`;
+  html += `
+    <div class="results-meta">
+      <span class="results-count">${combos.length} combination${combos.length!==1?'s':''}</span>
+      <span class="results-mode">${withReplacement?'with repeats':'no repeats'}</span>
+    </div>
+    <div class="combo-grid-header" style="grid-template-columns:${colTemplate}">
+      <div></div>
+      ${colCats.map(cat=>`<div class="combo-col-header" style="${catVars(cat)}">${cat.icon} ${esc(cat.label)}${cc[cat.id]>1?` <span style="opacity:.55">×${cc[cat.id]}</span>`:''}</div>`).join('')}
+    </div>
+    <div class="combo-grid">
+      ${combos.map((row,i)=>`
+        <div class="combo-row" style="grid-template-columns:${colTemplate};animation-delay:${i*40}ms">
+          <div class="combo-row-number">
+            <span>${i+1}</span>
+            ${row._timeMins != null ? `<div class="row-time">⏱ ${fmtDuration(row._timeMins)}</div>` : ''}
+          </div>
+          ${colCats.map(cat=>`
+            <div class="combo-cell" style="${catVars(cat)}">
+              <div class="combo-cell-label">${esc(cat.label)}${cc[cat.id]>1?`<span class="cell-count-badge"> ×${cc[cat.id]}</span>`:''}</div>
+              ${(row[cat.id]||[]).map((item, idx)=>`
+                <div class="combo-cell-item${cc[cat.id]>1?' multi':''}">
+                  <div class="combo-cell-text">${esc(item.text)}</div>
+                  ${cat.id === actCatId && item.attributes?.estimatedMinutes ? `<div class="combo-item-time">⏱ ${fmtDuration(item.attributes.estimatedMinutes)}</div>` : ''}
+                  ${modPill(resolveMod(row, cat.id, idx))}
+                  <div class="combo-cell-user">by ${esc(item.added_by_name)}</div>
+                </div>
+              `).join('')}
+            </div>
+          `).join('')}
+        </div>
+      `).join('')}
+    </div>
+  `;
+  return html;
+}
+
+// For each user in items, keep at most maxPerUser of their suggestions (random selection).
+function applyMaxPerUser(items, maxPerUser) {
+  if (!maxPerUser || maxPerUser <= 0) return items;
+  const byUser = new Map();
+  for (const s of items) {
+    if (!byUser.has(s.added_by)) byUser.set(s.added_by, []);
+    byUser.get(s.added_by).push(s);
+  }
+  const out = [];
+  byUser.forEach(userItems => out.push(...shuffle([...userItems]).slice(0, maxPerUser)));
+  return out;
+}
+
+function runGenerate(count, withReplacement, includeModifiers=false, modifierChance=50, catCounts=null, suggOverride=null, resultsId='results-area', reshuffleId='reshuffle-btn', maxPerUser=0) {
   const suggestions = suggOverride || poolState.suggestions;
   const resultsArea = document.getElementById(resultsId);
   const reshuffleBtn = document.getElementById(reshuffleId);
@@ -997,7 +1191,7 @@ function runGenerate(count, withReplacement, includeModifiers=false, modifierCha
   const pools = {};
   let anyEmpty = false;
   colCats.forEach(cat => {
-    const items = suggestions.filter(s => s.category_id === cat.id);
+    const items = applyMaxPerUser(suggestions.filter(s => s.category_id === cat.id), maxPerUser);
     if (items.length === 0) anyEmpty = true;
     pools[cat.id] = shuffle(items);
   });
@@ -1019,18 +1213,33 @@ function runGenerate(count, withReplacement, includeModifiers=false, modifierCha
     return;
   }
 
-  // Build shuffled modifier pool for no-repeat depletion
-  let modifierPool = [];
-  let modifierUsed = 0;
+  // Build per-type modifier pools (each modifier targets a suggestion type via attributes.appliesTo).
+  // Legacy/unset modifiers default to 'activity', preserving the original behavior.
+  const colCatIds = new Set(colCats.map(c => c.id));
+  const defaultModTarget = (colCats.find(c => c.id === 'activity') || colCats[0])?.id;
+  const modPools = {};   // catId → shuffled modifiers for that type
+  const modUsed  = {};   // catId → depletion index (no-repeat mode)
   if (includeModifiers && modCat) {
-    modifierPool = shuffle(suggestions.filter(s => s.category_id === modCat.id));
+    suggestions.filter(s => s.category_id === modCat.id).forEach(m => {
+      const target = m.attributes?.appliesTo || defaultModTarget;
+      if (!colCatIds.has(target)) return;
+      (modPools[target] ||= []).push(m);
+    });
+    Object.keys(modPools).forEach(k => { modPools[k] = shuffle(modPools[k]); modUsed[k] = 0; });
   }
 
-  const actCat = colCats.find(c => c.id === 'activity') || colCats[0];
+  // Roll a modifier for a single item of category `catId` (per-item, so any pick can get one)
+  const rollModifier = (catId) => {
+    const pool = modPools[catId];
+    if (!pool || pool.length === 0) return null;
+    if (Math.random() * 100 >= modifierChance) return null;
+    if (withReplacement) return pool[Math.floor(Math.random() * pool.length)];
+    return modUsed[catId] < pool.length ? pool[modUsed[catId]++] : null;
+  };
 
   const combos = [];
   for (let i = 0; i < actualCount; i++) {
-    const row = {};
+    const row = { _mods: {} };
     colCats.forEach(cat => {
       const n = cc[cat.id];
       if (withReplacement) {
@@ -1039,57 +1248,134 @@ function runGenerate(count, withReplacement, includeModifiers=false, modifierCha
       } else {
         row[cat.id] = pools[cat.id].slice(i * n, i * n + n);
       }
+      // Independent modifier roll for every item in the cell
+      row._mods[cat.id] = row[cat.id].map(() =>
+        includeModifiers ? rollModifier(cat.id) : null);
     });
-    // Roll once per row for a modifier on the primary activity item
-    row._modifier = null;
-    if (includeModifiers && modCat && modifierPool.length > 0) {
-      if (Math.random() * 100 < modifierChance) {
-        if (withReplacement) {
-          row._modifier = modifierPool[Math.floor(Math.random() * modifierPool.length)];
-        } else if (modifierUsed < modifierPool.length) {
-          row._modifier = modifierPool[modifierUsed++];
-        }
-      }
-    }
     combos.push(row);
   }
 
-  const colTemplate = `36px repeat(${colCats.length},1fr)`;
-  let html = '';
-  if (truncated) html += `<div class="warning-banner">⚠ Only ${actualCount} combination${actualCount!==1?'s':''} generated — not enough unique suggestions without repeats.</div>`;
-  html += `
-    <div class="results-meta">
-      <span class="results-count">${actualCount} combination${actualCount!==1?'s':''}</span>
-      <span class="results-mode">${withReplacement?'with repeats':'no repeats'}</span>
-    </div>
-    <div class="combo-grid-header" style="grid-template-columns:${colTemplate}">
-      <div></div>
-      ${colCats.map(cat=>`<div class="combo-col-header" style="${catVars(cat)}">${cat.icon} ${esc(cat.label)}${cc[cat.id]>1?` <span style="opacity:.55">×${cc[cat.id]}</span>`:''}</div>`).join('')}
-    </div>
-    <div class="combo-grid">
-      ${combos.map((row,i)=>`
-        <div class="combo-row" style="grid-template-columns:${colTemplate};animation-delay:${i*40}ms">
-          <div class="combo-row-number">${i+1}</div>
-          ${colCats.map(cat=>`
-            <div class="combo-cell" style="${catVars(cat)}">
-              <div class="combo-cell-label">${esc(cat.label)}${cc[cat.id]>1?`<span class="cell-count-badge"> ×${cc[cat.id]}</span>`:''}</div>
-              ${row[cat.id].map((item, idx)=>`
-                <div class="combo-cell-item${cc[cat.id]>1?' multi':''}">
-                  <div class="combo-cell-text">${esc(item.text)}</div>
-                  ${cat.id===actCat.id&&idx===0&&row._modifier?`<div class="combo-modifier-pill" style="--mod-color:${modCat.color}">${esc(modCat.icon)} ${esc(row._modifier.text)}</div>`:''}
-                  <div class="combo-cell-user">by ${esc(item.added_by_name)}</div>
-                </div>
-              `).join('')}
-            </div>
-          `).join('')}
-        </div>
-      `).join('')}
-    </div>
-  `;
-  resultsArea.innerHTML = html;
+  resultsArea.innerHTML = comboGridHTML(combos, { withReplacement, cc, truncated, actualCount });
   reshuffleBtn.style.display = 'flex';
   // Store for Save feature; expose Save button if present
   lastGeneratedData = { settings: { count, withReplacement, includeModifiers, modifierChance, catCounts: cc }, combos };
+  document.getElementById('save-combo-btn')?.style.setProperty('display', 'flex');
+}
+
+// Time-limit generate: each of `count` combo rows independently fills activities within [minMins, maxMins].
+// cc[activity] acts as a hard cap on activities per row; the time window determines how many actually fit.
+function runGenerateByTime(count, minMins, maxMins, withReplacement, includeModifiers, modifierChance, catCounts, maxPerUser=0) {
+  const suggestions  = poolState.suggestions;
+  const resultsArea  = document.getElementById('results-area');
+  const reshuffleBtn = document.getElementById('reshuffle-btn');
+
+  const colCats = CATEGORIES.filter(c => !c.isModifier);
+  const modCat  = CATEGORIES.find(c => c.isModifier);
+  const cc = {};
+  colCats.forEach(cat => { cc[cat.id] = Math.max(1, catCounts?.[cat.id] || 1); });
+
+  // Only activities with time estimates are eligible.
+  const timedPool = applyMaxPerUser(
+    suggestions.filter(s => s.category_id === 'activity' && s.attributes?.estimatedMinutes > 0),
+    maxPerUser
+  );
+  if (timedPool.length === 0) {
+    resultsArea.innerHTML = `<div class="error-banner">⚠ No activities have time estimates — add some via ＋ Add details or use "⏱ Guess times" first.</div>`;
+    reshuffleBtn.style.display = 'none';
+    return;
+  }
+
+  for (const cat of colCats.filter(c => c.id !== 'activity')) {
+    if (applyMaxPerUser(suggestions.filter(s => s.category_id === cat.id), maxPerUser).length === 0) {
+      resultsArea.innerHTML = `<div class="error-banner">⚠ Each category needs at least one suggestion before you can generate.</div>`;
+      reshuffleBtn.style.display = 'none';
+      return;
+    }
+  }
+
+  const otherPools = {};
+  colCats.forEach(cat => {
+    if (cat.id !== 'activity')
+      otherPools[cat.id] = shuffle(applyMaxPerUser(suggestions.filter(s => s.category_id === cat.id), maxPerUser));
+  });
+
+  // Per-type modifier pools (same logic as runGenerate).
+  const colCatIds = new Set(colCats.map(c => c.id));
+  const defaultModTarget = (colCats.find(c => c.id === 'activity') || colCats[0])?.id;
+  const modPools = {}, modUsed = {};
+  if (includeModifiers && modCat) {
+    suggestions.filter(s => s.category_id === modCat.id).forEach(m => {
+      const target = m.attributes?.appliesTo || defaultModTarget;
+      if (!colCatIds.has(target)) return;
+      (modPools[target] ||= []).push(m);
+    });
+    Object.keys(modPools).forEach(k => { modPools[k] = shuffle(modPools[k]); modUsed[k] = 0; });
+  }
+  const rollModifier = (catId) => {
+    const pool = modPools[catId];
+    if (!pool || pool.length === 0) return null;
+    if (Math.random() * 100 >= modifierChance) return null;
+    if (withReplacement) return pool[Math.floor(Math.random() * pool.length)];
+    return modUsed[catId] < pool.length ? pool[modUsed[catId]++] : null;
+  };
+
+  // No-repeat: track used activity ids across rows.
+  const usedActIds = new Set();
+  const combos = [];
+  let shortRows = 0;
+
+  for (let i = 0; i < count; i++) {
+    const eligible = withReplacement
+      ? [...timedPool]
+      : timedPool.filter(a => !usedActIds.has(a.id));
+    if (eligible.length === 0) break; // no more unique activities available
+
+    // Greedy fill per row: pick up to cc[activity] activities that fit within maxMins.
+    const shuffled = shuffle(eligible);
+    let rowTotal = 0;
+    const pickedActs = [];
+    for (const act of shuffled) {
+      if (pickedActs.length >= cc.activity) break;
+      const m = act.attributes.estimatedMinutes;
+      if (rowTotal + m <= maxMins) { pickedActs.push(act); rowTotal += m; }
+    }
+
+    if (!withReplacement) pickedActs.forEach(a => usedActIds.add(a.id));
+    if (rowTotal < minMins) shortRows++;
+
+    const row = { _mods: {}, _timeMins: rowTotal };
+    row.activity = pickedActs;
+    row._mods.activity = pickedActs.map(() => includeModifiers ? rollModifier('activity') : null);
+    colCats.forEach(cat => {
+      if (cat.id === 'activity') return;
+      const pool = otherPools[cat.id], n = cc[cat.id];
+      if (withReplacement) {
+        row[cat.id] = Array.from({ length: n }, () => pool[Math.floor(Math.random() * pool.length)]);
+      } else {
+        row[cat.id] = Array.from({ length: n }, (_, j) => pool[(combos.length * n + j) % pool.length]);
+      }
+      row._mods[cat.id] = row[cat.id].map(() => includeModifiers ? rollModifier(cat.id) : null);
+    });
+    combos.push(row);
+  }
+
+  reshuffleBtn.style.display = 'flex';
+
+  if (combos.length === 0) {
+    resultsArea.innerHTML = `<div class="error-banner">⚠ No combinations could be generated. Try widening the time window, enabling "Allow repeats", or lowering the minimum.</div>`;
+    return;
+  }
+
+  let html = '';
+  if (combos.length < count) {
+    html += `<div class="warning-banner">⚠ Only ${combos.length} combination${combos.length !== 1 ? 's' : ''} generated — ran out of unique timed activities.</div>`;
+  } else if (shortRows > 0) {
+    html += `<div class="warning-banner">⚠ ${shortRows} combination${shortRows !== 1 ? 's' : ''} couldn't reach the minimum time of ${fmtDuration(minMins)}. Try Reshuffle or lower the minimum.</div>`;
+  }
+  html += comboGridHTML(combos, { withReplacement, cc, truncated: false });
+  resultsArea.innerHTML = html;
+
+  lastGeneratedData = { settings: { timeLimitMode: true, count, minMins, maxMins, withReplacement, includeModifiers, modifierChance, catCounts: cc }, combos };
   document.getElementById('save-combo-btn')?.style.setProperty('display', 'flex');
 }
 
@@ -1179,40 +1465,9 @@ function memberRow(m, isOwner, createdBy) {
 function renderSavedComboSet(data) {
   if (!data?.combos?.length) return '<p style="font-size:13px;color:var(--text-muted);padding:12px 0">No combinations in this set.</p>';
   const colCats = CATEGORIES.filter(c => !c.isModifier);
-  const modCat  = CATEGORIES.find(c => c.isModifier);
-  const actCat  = colCats.find(c => c.id === 'activity') || colCats[0];
   const cc = {};
   colCats.forEach(cat => { cc[cat.id] = data.settings?.catCounts?.[cat.id] || 1; });
-  const colTemplate = `36px repeat(${colCats.length},1fr)`;
-  return `
-    <div class="results-meta">
-      <span class="results-count">${data.combos.length} combination${data.combos.length!==1?'s':''}</span>
-      <span class="results-mode">${data.settings?.withReplacement?'with repeats':'no repeats'}</span>
-    </div>
-    <div class="combo-grid-header" style="grid-template-columns:${colTemplate}">
-      <div></div>
-      ${colCats.map(cat=>`<div class="combo-col-header" style="${catVars(cat)}">${cat.icon} ${esc(cat.label)}${cc[cat.id]>1?` <span style="opacity:.55">×${cc[cat.id]}</span>`:''}</div>`).join('')}
-    </div>
-    <div class="combo-grid">
-      ${data.combos.map((row,i)=>`
-        <div class="combo-row" style="grid-template-columns:${colTemplate};animation-delay:${i*40}ms">
-          <div class="combo-row-number">${i+1}</div>
-          ${colCats.map(cat=>`
-            <div class="combo-cell" style="${catVars(cat)}">
-              <div class="combo-cell-label">${esc(cat.label)}${cc[cat.id]>1?`<span class="cell-count-badge"> ×${cc[cat.id]}</span>`:''}</div>
-              ${(row[cat.id]||[]).map((item, idx)=>`
-                <div class="combo-cell-item${cc[cat.id]>1?' multi':''}">
-                  <div class="combo-cell-text">${esc(item.text)}</div>
-                  ${cat.id===actCat.id&&idx===0&&row._modifier&&modCat?`<div class="combo-modifier-pill" style="--mod-color:${modCat.color}">${esc(modCat.icon)} ${esc(row._modifier.text)}</div>`:''}
-                  <div class="combo-cell-user">by ${esc(item.added_by_name)}</div>
-                </div>
-              `).join('')}
-            </div>
-          `).join('')}
-        </div>
-      `).join('')}
-    </div>
-  `;
+  return comboGridHTML(data.combos, { withReplacement: !!data.settings?.withReplacement, cc });
 }
 
 async function renderSavedTab() {
@@ -1367,7 +1622,7 @@ async function renderBrowsePool(id) {
           <div class="suggestion-card" style="${catVars(cat)}">
             <div class="suggestion-content">
               <div class="suggestion-text">${esc(s.text)}</div>
-              ${s.attributes?.estimatedMinutes ? `<div class="suggestion-attrs"><span class="suggestion-time-pill">⏱ ${esc(fmtDuration(s.attributes.estimatedMinutes))}</span></div>` : ''}
+              ${suggestionAttrPillsHTML(s)}
               <div class="suggestion-meta">
                 <span class="suggestion-user">${esc(s.added_by_name)}</span>
                 <span class="suggestion-dot"></span>
@@ -1468,46 +1723,48 @@ async function renderBrowsePool(id) {
             <span class="control-label">Combinations</span>
             <input type="number" class="count-input" id="b-combo-count" value="5" min="1" max="50"/>
           </div>
-          <div class="control-divider"></div>
-          <div class="gen-ctrl">
-            <span class="control-label">Allow repeats</span>
-            <div class="toggle-wrapper">
-              <label class="toggle"><input type="checkbox" id="b-replacement-toggle" checked><span class="toggle-track"><span class="toggle-thumb"></span></span></label>
-              <span class="toggle-label" id="b-toggle-label">Yes — same item can repeat</span>
-            </div>
-          </div>
-          <div class="control-divider"></div>
-          <div class="gen-ctrl">
-            <span class="control-label">Per combination</span>
-            <div class="cat-counts-row">
-              ${bColCats.map(cat=>`
-                <div class="cat-count-item" style="${catVars(cat)}">
-                  <span class="cat-count-icon">${cat.icon}</span>
-                  <input type="number" class="cat-count-input" id="b-cat-count-${cat.id}" value="1" min="1" max="10"/>
-                </div>
-              `).join('')}
-            </div>
-          </div>
-          ${hasModifiers ? `
-          <div class="control-divider"></div>
-          <div class="gen-ctrl">
-            <span class="control-label">Activity modifiers</span>
-            <div class="toggle-wrapper">
-              <label class="toggle"><input type="checkbox" id="b-modifier-toggle"><span class="toggle-track"><span class="toggle-thumb"></span></span></label>
-              <span class="toggle-label" id="b-modifier-label">Excluded</span>
-            </div>
-          </div>
-          <div class="chance-row" id="b-chance-row" style="display:none">
-            <span class="control-label">Modifier chance</span>
-            <div style="display:flex;align-items:center;gap:10px">
-              <input type="range" class="chance-slider" id="b-chance-slider" min="0" max="100" value="50"/>
-              <span class="chance-display" id="b-chance-display">50%</span>
-            </div>
-          </div>
-          ` : ''}
           <button class="btn-generate" id="b-generate-btn">Generate</button>
           <button class="btn-reshuffle" id="b-reshuffle-btn" style="display:none">Reshuffle</button>
         </div>
+        <details class="gen-advanced">
+          <summary class="details-toggle">⚙ Advanced options</summary>
+          <div class="details-panel">
+            <div class="gen-ctrl">
+              <span class="control-label">Allow repeats</span>
+              <div class="toggle-wrapper">
+                <label class="toggle"><input type="checkbox" id="b-replacement-toggle" checked><span class="toggle-track"><span class="toggle-thumb"></span></span></label>
+                <span class="toggle-label" id="b-toggle-label">Yes — same item can repeat</span>
+              </div>
+            </div>
+            <div class="gen-ctrl">
+              <span class="control-label">Per combination</span>
+              <div class="cat-counts-row">
+                ${bColCats.map(cat=>`
+                  <div class="cat-count-item" style="${catVars(cat)}">
+                    <span class="cat-count-icon">${cat.icon}</span>
+                    <input type="number" class="cat-count-input" id="b-cat-count-${cat.id}" value="1" min="1" max="10"/>
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+            ${hasModifiers ? `
+            <div class="gen-ctrl">
+              <span class="control-label">Modifiers</span>
+              <div class="toggle-wrapper">
+                <label class="toggle"><input type="checkbox" id="b-modifier-toggle"><span class="toggle-track"><span class="toggle-thumb"></span></span></label>
+                <span class="toggle-label" id="b-modifier-label">Excluded</span>
+              </div>
+            </div>
+            <div class="chance-row" id="b-chance-row" style="display:none">
+              <span class="control-label">Modifier chance</span>
+              <div style="display:flex;align-items:center;gap:10px">
+                <input type="range" class="chance-slider" id="b-chance-slider" min="0" max="100" value="50"/>
+                <span class="chance-display" id="b-chance-display">50%</span>
+              </div>
+            </div>
+            ` : ''}
+          </div>
+        </details>
         <div id="b-results-area"><div class="generate-placeholder"><div class="placeholder-glyph">✦</div><p class="placeholder-text">Click Generate</p></div></div>
       `;
       const tgl = document.getElementById('b-replacement-toggle');
