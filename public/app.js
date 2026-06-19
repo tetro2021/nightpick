@@ -93,6 +93,13 @@ function fmtDate(ts) { return new Date(ts).toLocaleDateString(undefined,{month:'
 function fmtShort(ts) { return new Date(ts).toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
 function initial(name) { return (name||'?')[0].toUpperCase(); }
 function catById(id) { return CATEGORIES.find(c=>c.id===id); }
+// Format an integer number of minutes as "1h 30m" / "45m" / "2h"
+function fmtDuration(mins) {
+  const m = Math.round(Number(mins));
+  if (!Number.isFinite(m) || m <= 0) return '';
+  const h = Math.floor(m / 60), rem = m % 60;
+  return h ? (rem ? `${h}h ${rem}m` : `${h}h`) : `${rem}m`;
+}
 function catVars(cat) { return `--cat-color:${cat.color};--cat-color-dim:${cat.colorDim};--cat-color-glow:${cat.colorGlow}`; }
 function setApp(html) { document.getElementById('app').innerHTML = html; }
 function loadingView() { setApp('<div class="loading-screen"><div class="spinner"></div></div>'); }
@@ -560,11 +567,45 @@ async function renderPoolTab(tab) {
   else if (tab === 'saved') await renderSavedTab();
 }
 
+// ===== OPTIONAL ATTRIBUTE FIELDS =====
+// Data-driven: returns the optional attribute inputs that apply to a category.
+// To add a new attribute later (e.g. location for all categories), extend these three.
+function hasAttributeFields(catId) { return catId === 'activity'; }
+
+function attributeFieldsHTML(catId, attrs = {}, idPrefix = 'attr') {
+  let html = '';
+  if (catId === 'activity') {
+    const mins = attrs.estimatedMinutes || 0;
+    const h = Math.floor(mins / 60), m = mins % 60;
+    html += `
+      <div class="attr-field">
+        <label class="attr-label">⏱ Estimated time</label>
+        <div class="time-picker">
+          <input type="number" id="${idPrefix}-hours" class="time-input" min="0" max="24" placeholder="0" value="${h||''}"/>
+          <span class="time-unit">hr</span>
+          <input type="number" id="${idPrefix}-mins" class="time-input" min="0" max="59" placeholder="0" value="${m||''}"/>
+          <span class="time-unit">min</span>
+        </div>
+      </div>`;
+  }
+  return html;
+}
+
+function readAttributeFields(catId, idPrefix = 'attr') {
+  const attrs = {};
+  if (catId === 'activity') {
+    const h = parseInt(document.getElementById(`${idPrefix}-hours`)?.value) || 0;
+    const m = parseInt(document.getElementById(`${idPrefix}-mins`)?.value) || 0;
+    const total = Math.min(h * 60 + m, 1440);
+    if (total > 0) attrs.estimatedMinutes = total;
+  }
+  return attrs;
+}
+
 // ===== SUGGEST TAB =====
 function renderSuggestTab() {
   const { pool, suggestions } = poolState;
   const isMember = !!pool.my_role;
-  const isOwner  = pool.my_role === 'owner';
   const cat = catById(poolState.activeCategory);
 
   const content = document.getElementById('pool-tab-content');
@@ -576,11 +617,15 @@ function renderSuggestTab() {
         <input type="text" id="suggestion-input" placeholder="Add a ${cat.label.toLowerCase()}…" maxlength="200" autocomplete="off"/>
         <button class="btn-add" id="add-btn" style="background:${cat.color}">Add</button>
       </div>
+      <div id="add-details-box"></div>
+      <div id="suggest-toolbar"></div>
     ` : `<div class="readonly-notice">👁 You're viewing this pool as a guest — join to contribute suggestions.</div>`}
     <div id="suggestions-area"></div>
   `;
 
   renderCategoryTabs();
+  renderAddDetails();
+  renderSuggestToolbar();
   renderSuggestions();
 
   if (isMember) {
@@ -591,19 +636,69 @@ function renderSuggestTab() {
       if (!text) { addInput.focus(); return; }
       addBtn.disabled = true;
       try {
-        const s = await API.post(`/pools/${pool.id}/suggestions`, { categoryId: poolState.activeCategory, text });
+        const attributes = readAttributeFields(poolState.activeCategory, 'add');
+        const s = await API.post(`/pools/${pool.id}/suggestions`, { categoryId: poolState.activeCategory, text, attributes });
         poolState.suggestions.push(s);
         poolState.pool.counts = poolState.pool.counts || {};
         poolState.pool.counts[poolState.activeCategory] = (poolState.pool.counts[poolState.activeCategory]||0)+1;
         addInput.value = '';
         addInput.focus();
         renderCategoryTabs();
+        renderAddDetails(); // reset the detail inputs
         renderSuggestions();
       } catch(err) { toast(err.message, 'error'); }
       finally { addBtn.disabled = false; }
     };
     addBtn.addEventListener('click', doAdd);
     addInput.addEventListener('keydown', e => { if(e.key==='Enter') doAdd(); });
+  }
+}
+
+// Optional "Add details" disclosure under the add form — only for categories with attributes
+function renderAddDetails() {
+  const box = document.getElementById('add-details-box');
+  if (!box) return;
+  const catId = poolState.activeCategory;
+  if (!hasAttributeFields(catId)) { box.innerHTML = ''; return; }
+  box.innerHTML = `
+    <details class="add-details">
+      <summary class="details-toggle">＋ Add details</summary>
+      <div class="details-panel">${attributeFieldsHTML(catId, {}, 'add')}</div>
+    </details>`;
+}
+
+// "Let Nightpick Guess" lives here — owner-only, activity-only, LLM-enabled
+function renderSuggestToolbar() {
+  const bar = document.getElementById('suggest-toolbar');
+  if (!bar) return;
+  const isOwner = poolState.pool.my_role === 'owner';
+  const show = isOwner && poolState.activeCategory === 'activity' && Auth.config.llmEnabled;
+  if (!show) { bar.innerHTML = ''; return; }
+  bar.innerHTML = `<button class="btn-guess" id="guess-btn" style="${catVars(catById('activity'))}">✨ Let Nightpick Guess times</button>`;
+  document.getElementById('guess-btn').addEventListener('click', runGuessTimes);
+}
+
+async function runGuessTimes() {
+  const btn = document.getElementById('guess-btn');
+  if (!btn) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '✨ Guessing…';
+  try {
+    const { updated } = await API.post(`/pools/${poolState.pool.id}/estimate-times`);
+    if (!updated || updated.length === 0) {
+      toast('Every activity already has a time estimate.', 'info');
+    } else {
+      const byId = new Map(updated.map(u => [u.id, u]));
+      poolState.suggestions = poolState.suggestions.map(s => byId.get(s.id) || s);
+      renderSuggestions();
+      toast(`Estimated ${updated.length} activit${updated.length===1?'y':'ies'}.`, 'success');
+    }
+  } catch(err) {
+    toast(err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
   }
 }
 
@@ -621,6 +716,8 @@ function renderCategoryTabs() {
     btn.addEventListener('click', () => {
       poolState.activeCategory = btn.dataset.cat;
       renderCategoryTabs();
+      renderAddDetails();
+      renderSuggestToolbar();
       renderSuggestions();
       // update add form placeholder
       const cat = catById(poolState.activeCategory);
@@ -653,11 +750,13 @@ function renderSuggestions() {
     </div>
     <div class="suggestions-grid">
       ${catSuggestions.map(s => {
-        const canDelete = isOwner || s.added_by === currentUser?.id;
+        const canEdit = isOwner || s.added_by === currentUser?.id;
+        const mins = s.attributes?.estimatedMinutes;
         return `
           <div class="suggestion-card" style="${catVars(cat)}" data-id="${s.id}">
             <div class="suggestion-content">
               <div class="suggestion-text">${esc(s.text)}</div>
+              ${mins ? `<div class="suggestion-attrs"><span class="suggestion-time-pill">⏱ ${esc(fmtDuration(mins))}</span></div>` : ''}
               <div class="suggestion-meta">
                 <span class="suggestion-user">${esc(s.added_by_name)}</span>
                 <span class="suggestion-dot"></span>
@@ -665,7 +764,8 @@ function renderSuggestions() {
               </div>
             </div>
             <div class="suggestion-actions">
-              ${canDelete ? `<button class="delete-btn" data-id="${s.id}" title="Delete">×</button>` : ''}
+              ${canEdit ? `<button class="edit-btn" data-id="${s.id}" title="Edit">✎</button>` : ''}
+              ${canEdit ? `<button class="delete-btn" data-id="${s.id}" title="Delete">×</button>` : ''}
             </div>
           </div>
         `;
@@ -685,6 +785,50 @@ function renderSuggestions() {
         toast('Suggestion removed.', 'success');
       } catch(err) { toast(err.message, 'error'); }
     });
+  });
+
+  area.querySelectorAll('.edit-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const s = poolState.suggestions.find(x => x.id === btn.dataset.id);
+      if (s) openEditSuggestionModal(s);
+    });
+  });
+}
+
+function openEditSuggestionModal(s) {
+  const cat = catById(s.category_id);
+  openModal(`
+    <button class="modal-close">×</button>
+    <div class="modal-title">Edit ${esc(cat?.label || 'suggestion')}</div>
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div class="field"><label>Text *</label><input type="text" id="edit-text" class="input" maxlength="200" value="${esc(s.text)}"/></div>
+      ${hasAttributeFields(s.category_id) ? `<div class="field">${attributeFieldsHTML(s.category_id, s.attributes || {}, 'edit')}</div>` : ''}
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" id="edit-cancel">Cancel</button>
+      <button type="button" class="btn btn-primary" id="edit-save">Save changes</button>
+    </div>
+  `, (modal) => {
+    const input = modal.querySelector('#edit-text');
+    input.focus();
+    modal.querySelector('#edit-cancel').onclick = closeModal;
+    const save = async () => {
+      const text = input.value.trim();
+      if (!text) { input.focus(); return; }
+      const saveBtn = modal.querySelector('#edit-save');
+      saveBtn.disabled = true;
+      try {
+        const attributes = readAttributeFields(s.category_id, 'edit');
+        const updated = await API.put(`/pools/${poolState.pool.id}/suggestions/${s.id}`, { text, attributes });
+        poolState.suggestions = poolState.suggestions.map(x => x.id === updated.id ? updated : x);
+        closeModal();
+        renderSuggestions();
+        toast('Suggestion updated.', 'success');
+      } catch(err) { toast(err.message, 'error'); saveBtn.disabled = false; }
+    };
+    modal.querySelector('#edit-save').onclick = save;
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
   });
 }
 
@@ -1223,6 +1367,7 @@ async function renderBrowsePool(id) {
           <div class="suggestion-card" style="${catVars(cat)}">
             <div class="suggestion-content">
               <div class="suggestion-text">${esc(s.text)}</div>
+              ${s.attributes?.estimatedMinutes ? `<div class="suggestion-attrs"><span class="suggestion-time-pill">⏱ ${esc(fmtDuration(s.attributes.estimatedMinutes))}</span></div>` : ''}
               <div class="suggestion-meta">
                 <span class="suggestion-user">${esc(s.added_by_name)}</span>
                 <span class="suggestion-dot"></span>
