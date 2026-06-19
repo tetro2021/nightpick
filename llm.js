@@ -39,7 +39,7 @@ async function generate(prompt, { format } = {}) {
  * @param {{id:string, text:string}[]} activities
  * @returns {Promise<Map<string, number>>} id → minutes (only ids the model returned valid numbers for)
  */
-const ESTIMATE_BATCH_SIZE = 15;
+const ESTIMATE_BATCH_SIZE = parseInt(process.env.LLM_ESTIMATE_BATCH_SIZE, 10) || 15;
 
 async function estimateBatch(batch) {
   const list = batch.map(a => `- id "${a.id}": ${a.text}`).join('\n');
