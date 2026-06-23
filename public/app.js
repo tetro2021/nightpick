@@ -756,7 +756,7 @@ function renderSuggestToolbar() {
   const isOwner  = poolState.pool.my_role === 'owner';
   const cat      = catById(poolState.activeCategory);
   const showSuggest = isMember && Auth.config.llmEnabled;
-  const showGuess   = isOwner && poolState.activeCategory === 'activity' && Auth.config.llmEnabled;
+  const showGuess   = isMember && poolState.activeCategory === 'activity' && Auth.config.llmEnabled;
 
   if (!showSuggest && !showGuess) { bar.innerHTML = ''; return; }
 

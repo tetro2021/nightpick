@@ -456,23 +456,23 @@ app.delete('/api/pools/:id/suggestions/:sid', auth, (req, res) => {
   res.json({ ok: true });
 });
 
-// "Let Nightpick Guess" — owner-only bulk LLM time estimates for activities missing one
+// "Let Nightpick Guess" — any member; estimates times only for their own activity submissions
 app.post('/api/pools/:id/estimate-times', auth, async (req, res) => {
   if (!LLM_ENABLED) return res.status(503).json({ error: 'Time estimation is not available on this server.' });
   const mem = getMembership(req.params.id, req.user.id);
-  if (mem?.role !== 'owner') return res.status(403).json({ error: 'Owner only.' });
+  if (!mem) return res.status(403).json({ error: 'Not a member.' });
 
-  const last = estimateRateLimit.get(req.params.id) || 0;
+  const last = estimateRateLimit.get(req.user.id) || 0;
   if (Date.now() - last < ESTIMATE_COOLDOWN_MS)
     return res.status(429).json({ error: 'Please wait a moment before guessing again.' });
 
-  // Activities with no estimate yet
-  const rows = db.prepare("SELECT * FROM suggestions WHERE pool_id=? AND category_id='activity'").all(req.params.id);
+  // Only the user's own activities with no estimate yet
+  const rows = db.prepare("SELECT * FROM suggestions WHERE pool_id=? AND category_id='activity' AND added_by=?").all(req.params.id, req.user.id);
   const pending = rows.map(serializeSuggestion).filter(s => s.attributes.estimatedMinutes == null);
   if (!pending.length) return res.json({ updated: [] });
 
   const batch = pending.slice(0, ESTIMATE_MAX);
-  estimateRateLimit.set(req.params.id, Date.now());
+  estimateRateLimit.set(req.user.id, Date.now());
 
   let estimates;
   try {
