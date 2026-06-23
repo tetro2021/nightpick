@@ -22,7 +22,7 @@ try {
   fs.writeFileSync(SECRET_FILE, JWT_SECRET);
 }
 
-const SUGGESTION_LIMIT    = 100;     // per category per pool
+const SUGGESTION_LIMIT    = parseInt(process.env.SUGGESTION_LIMIT, 10) || 200; // per category per pool
 const SAVED_COMBO_LIMIT   = 50;      // saved sets per pool
 const SAVED_COMBO_MAX_BYTES = 500_000; // 500 KB — above any reachable UI maximum
 const INVITE_ONLY         = process.env.INVITE_ONLY   === 'true';
